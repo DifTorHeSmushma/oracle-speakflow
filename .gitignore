@@ -1,0 +1,33 @@
+node_modules/
+dist/
+dist-ui/
+dist-installer/
+test-results/
+test.wav
+.env
+*.log
+
+# MCP / local stdio test artifacts (do not commit)
+mcp-test-stderr.txt
+scripts/mcp-stderr.txt
+scripts/mcp-stdout.txt
+scripts/mcp-input.jsonl
+
+# AI session orchestration (ephemeral)
+.agents/architect-*.json
+.agents/architect-*.md
+.agents/ARCHITECT-*.md
+.agents/ORCHESTRATION-STATE.md
+architect/
+
+# Local spikes, logs, and experiments
+scratch/
+
+# Local-only planning (never publish to GitHub)
+MACOS_BUILD_PRIVATE.md
+docs/architect-knowledge-pack.md
+docs/forward-work-session-brief.md
+docs/ASK-ARCHITECT-MUSCLE.md
+docs/archon-v3-*-forensic-handoff-PASTE.md
+scripts/ask-architect.ps1
+.agents/execution-reports/

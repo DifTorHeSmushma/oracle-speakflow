@@ -1,0 +1,102 @@
+/* M5-T02: Geist font via Google Fonts CDN (offline fallback: Inter → system-ui) */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+/* P3-T01: Tailwind v4 CSS-first import — no tailwind.config.js needed. */
+@import "tailwindcss";
+
+/*
+ * PRD §6 Design Tokens (Q6: tokens via Tailwind, layout via scoped CSS)
+ * All components reference these CSS custom properties via var(--sf-*).
+ */
+@theme {
+  /* Colors — zinc palette (950–100) + indigo palette */
+  --color-sf-bg:       #09090b; /* zinc-950 */
+  --color-sf-surface:  #18181b; /* zinc-900 */
+  --color-sf-surface2: #27272a; /* zinc-800 — elevated surface */
+  --color-sf-border:   #27272a; /* zinc-800 */
+  --color-sf-border2:  #3f3f46; /* zinc-700 — focus rings */
+  --color-sf-text:     #f4f4f5; /* zinc-100 */
+  --color-sf-text2:    #e4e4e7; /* zinc-200 */
+  --color-sf-muted:    #a1a1aa; /* zinc-400 */
+  --color-sf-muted2:   #71717a; /* zinc-500 */
+  --color-sf-accent:   #6366f1; /* indigo-500 */
+  --color-sf-accent2:  #4f46e5; /* indigo-600 — hover */
+  --color-sf-accent3:  #818cf8; /* indigo-400 — light accent */
+  --color-sf-accent-bg: #1e1b4b; /* indigo-950 — accent bg */
+  --color-sf-error:    #f87171; /* red-400 */
+  --color-sf-error-bg: #1c0a0a; /* dark red bg */
+  --color-sf-success:  #22c55e; /* green-500 */
+  --color-sf-success2: #4ade80; /* green-400 */
+  --color-sf-warn:     #eab308; /* yellow-500 */
+
+  /* M5-T02: Typography — Inter as primary (portfolio-grade, Geist-like) */
+  --font-sf-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-sf-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  /* M5-T02: Type scale */
+  --text-sf-title:   0.8125rem; /* 13px — app header title */
+  --text-sf-body:    0.75rem;   /* 12px — default body */
+  --text-sf-caption: 0.6875rem; /* 11px — labels, badges, secondary */
+  --text-sf-micro:   0.625rem;  /* 10px — very small labels */
+
+  /* Radius */
+  --radius-sf:   0.5rem;   /* 8px */
+  --radius-sf-sm: 0.375rem; /* 6px */
+  --radius-sf-lg: 0.75rem;  /* 12px */
+}
+
+/* Global CSS custom property aliases for scoped-CSS components (Q6) */
+:root {
+  --sf-bg:       var(--color-sf-bg);
+  --sf-surface:  var(--color-sf-surface);
+  --sf-surface2: var(--color-sf-surface2);
+  --sf-border:   var(--color-sf-border);
+  --sf-border2:  var(--color-sf-border2);
+  --sf-text:     var(--color-sf-text);
+  --sf-text2:    var(--color-sf-text2);
+  --sf-muted:    var(--color-sf-muted);
+  --sf-muted2:   var(--color-sf-muted2);
+  --sf-accent:   var(--color-sf-accent);
+  --sf-accent2:  var(--color-sf-accent2);
+  --sf-accent3:  var(--color-sf-accent3);
+  --sf-accent-bg: var(--color-sf-accent-bg);
+  --sf-error:    var(--color-sf-error);
+  --sf-error-bg: var(--color-sf-error-bg);
+  --sf-success:  var(--color-sf-success);
+  --sf-success2: var(--color-sf-success2);
+  --sf-warn:     var(--color-sf-warn);
+  --sf-font:     var(--font-sf-sans);
+  --sf-mono:     var(--font-sf-mono);
+  --sf-radius:   var(--radius-sf);
+  --sf-radius-sm: var(--radius-sf-sm);
+  --sf-radius-lg: var(--radius-sf-lg);
+
+  /* M5-T02: Type scale vars */
+  --sf-text-title:   var(--text-sf-title);
+  --sf-text-body:    var(--text-sf-body);
+  --sf-text-caption: var(--text-sf-caption);
+  --sf-text-micro:   var(--text-sf-micro);
+
+  /* M5-T01: shadcn-svelte CSS var bridge → --sf-* tokens
+   * Maps shadcn convention (--background, --foreground, etc.)
+   * to Oracle SpeakFlow tokens — no duplication.
+   */
+  --background:           var(--sf-bg);
+  --foreground:           var(--sf-text);
+  --card:                 var(--sf-surface);
+  --card-foreground:      var(--sf-text);
+  --muted:                var(--sf-surface);
+  --muted-foreground:     var(--sf-muted);
+  --border:               var(--sf-border);
+  --input:                var(--sf-border);
+  --ring:                 var(--sf-accent);
+  --primary:              var(--sf-accent);
+  --primary-foreground:   var(--sf-text);
+  --secondary:            var(--sf-surface);
+  --secondary-foreground: var(--sf-muted);
+  --accent:               var(--sf-accent);
+  --accent-foreground:    var(--sf-text);
+  --destructive:          var(--sf-error);
+  --destructive-foreground: var(--sf-text);
+  --radius:               var(--sf-radius);
+}

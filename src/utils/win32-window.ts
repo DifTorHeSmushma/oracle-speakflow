@@ -1,0 +1,79 @@
+// Read-only Windows foreground introspection (Spec §4.2 / Invariant #18).
+// No SetForegroundWindow, no AttachThreadInput, no per-call Add-Type.
+// Single batched call returns hwnd + className + processName together.
+import { spawnSync } from "node:child_process";
+
+export type ForegroundInfo = { hwnd: string; className: string; processName: string } | null;
+
+// One-shot PS script: compiles Add-Type once per invocation, returns "|"-delimited result.
+// ~200ms latency per call — acceptable because getForegroundInfo is called at speechStart /
+// keydown (async, non-critical) and at inject time (after Whisper, well within 800ms budget).
+const FOREGROUND_SCRIPT = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class SfWin32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int n);
+}
+"@
+try {
+  $hw = [SfWin32]::GetForegroundWindow()
+  $targetPid = [uint32]0
+  [void][SfWin32]::GetWindowThreadProcessId($hw, [ref]$targetPid)
+  $cn = New-Object System.Text.StringBuilder 256
+  [void][SfWin32]::GetClassName($hw, $cn, 256)
+  $pn = try { $p = Get-Process -Id $targetPid -EA Stop; try { $p.MainModule.ModuleName } catch { $p.Name + '.exe' } } catch { '' }
+  Write-Output "$($hw.ToString())|$($cn.ToString())|$pn"
+} catch {
+  Write-Output 'null'
+}
+`.trim();
+
+export function getForegroundInfo(): ForegroundInfo {
+  if (process.platform !== "win32") return null;
+  try {
+    const result = spawnSync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", FOREGROUND_SCRIPT],
+      { encoding: "utf8", timeout: 3_000 }
+    );
+    if (result.error || result.status !== 0) {
+      const errMsg = result.stderr?.trim() || result.error?.message || `exit ${result.status}`;
+      process.stderr.write(`[win32] getForegroundInfo failed: ${errMsg}\n`);
+      return null;
+    }
+    const line = (result.stdout ?? "").trim();
+    if (!line || line === "null" || line.startsWith("ERR:")) {
+      if (line.startsWith("ERR:")) {
+        process.stderr.write(`[win32] getForegroundInfo script error: ${line}\n`);
+      }
+      return null;
+    }
+    const idx1 = line.indexOf("|");
+    const idx2 = line.indexOf("|", idx1 + 1);
+    if (idx1 === -1 || idx2 === -1) return null;
+    return {
+      hwnd: line.slice(0, idx1),
+      className: line.slice(idx1 + 1, idx2),
+      processName: line.slice(idx2 + 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function nativeHandleEquals(hwndDecimal: string, nativeBuffer: Buffer): boolean {
+  try {
+    const hwnd = BigInt(hwndDecimal);
+    const fromBuf =
+      nativeBuffer.length >= 8
+        ? nativeBuffer.readBigInt64LE(0)
+        : BigInt(nativeBuffer.readUInt32LE(0));
+    return hwnd === fromBuf;
+  } catch {
+    return false;
+  }
+}
