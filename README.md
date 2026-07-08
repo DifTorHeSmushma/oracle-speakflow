@@ -14,6 +14,12 @@ Fast voice-to-text for anyone who types: speak naturally — **hands-free** or w
 
 **Listen → Transcribe (Groq cloud or local Whisper) → Correct → Paste where you're typing**
 
+<div align="center">
+
+![Oracle SpeakFlow — hands-free listening UI](docs/assets/app-screenshot.png)
+
+</div>
+
 ## About the developer
 
 **My name is Dom.** I'm a **Kru Muay Thai** — I train and teach Muay Thai, and for the past **18 months** I've been **self-teaching AI coding every day**. I've recently moved into a more **structured study sabbatical**, full-time focused on building my development environment and tools like SpeakFlow.
