@@ -7,6 +7,7 @@ import { getBinaryPath } from "../utils/binaryPath.js";
 import { resolveBundledBinaryName } from "../utils/binaryNames.js";
 import { resolveDshowAudioInput } from "../utils/dshow-audio.js";
 import { resolveAvfAudioInput } from "../utils/avfoundation-audio.js";
+import { resolvePulseAudioInput } from "../utils/pulse-audio.js";
 import type { RecorderError } from "./recorder.js";
 
 // 512 samples × 2 bytes/sample (s16le) = 1024 bytes per frame
@@ -15,8 +16,10 @@ const FRAME_BYTES = FRAME_SAMPLES * 2;
 const SAMPLE_RATE = 16_000;
 const RING_BUFFER_FRAMES = 300; // ~9.6 s at 32 ms/frame
 
-function buildFfmpegContinuousArgs(audioInput: string): string[] {
-  const inputFormat = process.platform === "darwin" ? "avfoundation" : "dshow";
+export function buildFfmpegContinuousArgs(audioInput: string): string[] {
+  const inputFormat =
+    process.platform === "darwin" ? "avfoundation" :
+    process.platform === "linux" ? "pulse" : "dshow";
   return [
     "-f", inputFormat,
     "-i", audioInput,
@@ -112,6 +115,7 @@ function resolveFFmpeg(): string {
 
 function resolveAudioInput(ffmpegPath: string): string {
   if (process.platform === "darwin") return resolveAvfAudioInput();
+  if (process.platform === "linux") return resolvePulseAudioInput();
   return resolveDshowAudioInput(ffmpegPath);
 }
 

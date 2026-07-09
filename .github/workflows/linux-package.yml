@@ -84,6 +84,35 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
+      # G31: runner audio smoke — proves FFmpeg reads frames through the PulseAudio/PipeWire API.
+      # Pre-authorized degrade: if the runner can't host a pulse daemon, degrade to device-enumeration
+      # assert (pactl loads the null-sink module OR lists ≥1 source). Human smoke carries L-4 proof.
+      - name: G31 — pulse audio smoke (null-sink capture test)
+        run: |
+          set -euo pipefail
+
+          sudo apt-get install -y pulseaudio pulseaudio-utils ffmpeg
+
+          # Attempt full null-sink capture smoke.
+          if pulseaudio --start --exit-idle-time=-1 2>/tmp/pa_start.err; then
+            pactl load-module module-null-sink sink_name=sf_test
+            ffmpeg -f pulse -i sf_test.monitor -t 1 -ar 16000 -ac 1 -f s16le -y /tmp/cap.raw
+            test -s /tmp/cap.raw
+            echo "G31 PASS (full null-sink capture)"
+          else
+            echo "WARN: pulseaudio --start failed (runner limitation — pre-authorized degrade)"
+            cat /tmp/pa_start.err || true
+            # Degrade: assert null-sink module loads OR at least one source is listed.
+            if pactl load-module module-null-sink sink_name=sf_degrade 2>/dev/null; then
+              echo "G31 PASS (degrade: null-sink module loaded)"
+            elif pactl list sources short 2>/dev/null | grep -q .; then
+              echo "G31 PASS (degrade: ≥1 source enumerated)"
+            else
+              echo "G31 FAIL: pulse daemon unavailable and no sources enumerable"
+              exit 1
+            fi
+          fi
+
       # G28: headless launch-verify + nut-js [SPIKE] load probe (LD7 spike half 1).
       # Proves: deb Depends resolve on stock Ubuntu 24.04; app launches; nut-js loads OK.
       - name: G28 — install deb + verify launch + nut-js load
