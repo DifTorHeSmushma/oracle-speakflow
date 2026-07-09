@@ -2,9 +2,9 @@
 
 **Consumer:** Fable 5 (`claude-fable-5-thinking-high`) @ Oracle-SpeakFlow repo root  
 **Date:** 2026-07-09  
-**Authority:** `docs/DESIGN/INTENT-m7-cross-platform-native-parity.md` (Gate B7 approved)  
-**Prerequisite:** macOS Wave 7a merged (capture + paste + CI package)  
-**Do NOT start until:** macOS `Mac Package` workflow is green on `main`
+**Authority:** `docs/DESIGN/INTENT-m7b-linux-parity.md` (Gate B7b — **primary**) + `docs/DESIGN/INTENT-m7-cross-platform-native-parity.md` (parent)  
+**Fable 5 command:** `docs/DESIGN/FABLE5-LINUX-PASTE-COMMAND.md` — **paste that file whole**  
+**Prerequisite:** macOS Wave 7a merged + Mac Package CI green on `main` ✅
 
 ---
 
@@ -28,6 +28,7 @@ Then **engineering Spec** → `docs/DESIGN/M7_LINUX_PARITY_SPEC.md` (Gate D1)
 
 | File | Why |
 |------|-----|
+| **`docs/DESIGN/INTENT-m7b-linux-parity.md`** | **Primary authority — forensic Linux intent** |
 | `CLAUDE.md` | Invariants #17–#19 (paste safety, no foreground steal) |
 | `src/services/paste.ts` | Pure decision ladder — add `linux` backend, do not break Windows |
 | `src/utils/win32-window.ts` | Foreground API — pattern for `linux-window.ts` |
@@ -81,4 +82,4 @@ Blockers for DOM: _
 
 ---
 
-*Paste this file to Fable 5 after macOS Wave 7a CI is green.*
+*Use `FABLE5-LINUX-PASTE-COMMAND.md` — not this file alone.*
