@@ -80,9 +80,10 @@ jobs:
         run: mkdir -p resources/bin
 
       - name: Package (electron-builder — dmg + zip, ad-hoc signed)
-        run: npm run package
+        # --publish never: CI sets GH_* env vars; electron-builder v26 auto-triggers
+        # "implicit publishing" without a token and fails. We upload artifacts manually.
+        run: npx electron-builder --publish never
         env:
-          # Suppress code-signing identity search; identity: null already set in package.json build.mac
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
       # G23-runner: verify the macOS bundle ON the GitHub cloud Mac (no physical Mac required).
