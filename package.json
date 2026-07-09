@@ -99,7 +99,13 @@
         { "target": "zip" }
       ],
       "category": "public.app-category.productivity",
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "hardenedRuntime": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Oracle SpeakFlow needs the microphone to transcribe your speech."
+      }
     }
   }
 }

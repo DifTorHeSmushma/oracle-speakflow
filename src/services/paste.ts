@@ -39,6 +39,10 @@ const TERMINAL_PROCESSES = new Set([
   "conemu.exe",
   "hyper.exe",
   "terminus.exe",
+  "terminal.app",
+  "iterm.app",
+  "iterm2.app",
+  "warp.app",
 ]);
 
 /**

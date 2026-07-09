@@ -37,7 +37,7 @@ Any assistance — buying me a coffee or a donation — is greatly appreciated a
 | Platform | Status | What you get |
 |----------|--------|----------------|
 | **Windows** | ✅ Shipped | NSIS installer (`npm run package`); bundled local Whisper (Fast tier); hands-free + paste |
-| **macOS** | 🟡 Beta (CI-built) | `.dmg` + `.zip` from GitHub Actions **Mac Package** workflow (ad-hoc signed). Cloud transcription works; local Whisper not bundled on Mac yet. If Gatekeeper blocks: right-click → **Open**. |
+| **macOS** | 🟡 Beta (CI-built) | `.dmg` + `.zip` from **Mac Package** workflow. **Parity wave 7a:** avfoundation mic, Cmd+V paste, Accessibility. Grant **Microphone** + **Accessibility** in System Settings. Cloud transcribe; local Whisper not bundled yet. Gatekeeper: right-click → **Open**. |
 | **Linux** | ⏳ In progress (M7) | Ubuntu CI runs tests on every push — **no installable build yet** |
 
 > **Honest scope:** Windows is the full product today. macOS is a **proof build** (launch + cloud transcribe), not full parity. Linux packaging is the next milestone.
@@ -113,7 +113,7 @@ Dictionary runs **after** transcription, **before** paste. Entries are stored in
 4. Click **Save** at the bottom of Settings.
 5. Focus your target app → speak as usual.
 
-**macOS beta:** use **Cloud (Groq)** only for now. Local Whisper is not bundled on Mac (M7).
+**macOS beta:** use **Cloud (Groq)** for now. After install, grant **Microphone** and **Accessibility** (System Settings → Privacy & Security). Local Whisper bundling is a later M7 slice.
 
 ### Voice settings (optional)
 

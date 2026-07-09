@@ -48,6 +48,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install FFmpeg (macOS capture)
+        run: brew install ffmpeg
+
       # Assert all CI gates pass before packaging
       - name: check:manifest (G14)
         run: npm run check:manifest

@@ -4,7 +4,7 @@
 **Date:** 2026-07-08
 **Author:** Library Architect (Lane 0, Opus-class) — Oracle-SpeakFlow
 **Consumer:** Frontier PRD/Spec author = **Fable 5** (`claude-fable-5-thinking-high`) @ Oracle-SpeakFlow repo root
-**Status:** 🟡 **DRAFT — parked until M6 Gate C1/D1 complete and public launch shipped.** Do not run STORM/WARGAME/PRD until M6 is GREEN and DOM explicitly opens M7.
+**Status:** ✅ **Gate B7 APPROVED (2026-07-09)** — DOM: macOS parity first (CI + tester artifact), then Fable 5 STORM for Linux. Repo may stay private during build.
 **Altitude:** Intent only — problem, bet, falsification, outcomes, constraints. No file trees, APIs, or implementation steps.
 **Prerequisite:** **M6 complete** (`docs/DESIGN/INTENT-m6-public-launch-parity.md` → PRD → Spec → build → public repo with honest README). M7 assumes bundled local inference, model tiers, paste-focus fix, and **macOS CI that builds + launches** already exist.
 
@@ -157,7 +157,7 @@ Do not start M7 until:
 - M6 shipped and repo **public** with honest README.
 - DOM explicitly approves M7 scope and accepts **Linux CI + external smoke** dependency.
 
-`_M7 approved by DOM: ______ / pending (parked until post-M6)_`
+`_M7 approved by DOM: 2026-07-09 — macOS parity first, Linux via Fable 5 STORM second_`
 
 ---
 

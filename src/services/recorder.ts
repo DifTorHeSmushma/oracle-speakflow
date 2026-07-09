@@ -3,7 +3,9 @@ import { existsSync } from "node:fs";
 import { Writable } from "node:stream";
 import { Result, Ok, Err } from "../utils/result.js";
 import { getBinaryPath } from "../utils/binaryPath.js";
+import { resolveBundledBinaryName } from "../utils/binaryNames.js";
 import { resolveDshowAudioInput } from "../utils/dshow-audio.js";
+import { resolveAvfAudioInput } from "../utils/avfoundation-audio.js";
 
 export type RecorderError =
   | { kind: "permissionDenied"; message: string }
@@ -17,8 +19,9 @@ export type RecordingSession = {
 const STOP_TIMEOUT_MS = 30_000;
 
 function buildFfmpegRecordArgs(audioInput: string): string[] {
+  const inputFormat = process.platform === "darwin" ? "avfoundation" : "dshow";
   return [
-    "-f", "dshow",
+    "-f", inputFormat,
     "-i", audioInput,
     "-ar", "16000",
     "-ac", "1",
@@ -34,10 +37,15 @@ function buildFfmpegRecordArgs(audioInput: string): string[] {
  * - Dev without binary: falls back to 'ffmpeg' from system PATH (with a warning)
  */
 function resolveFFmpeg(): string {
-  const bundled = getBinaryPath("ffmpeg.exe");
+  const bundled = getBinaryPath(resolveBundledBinaryName("ffmpeg"));
   if (existsSync(bundled)) return bundled;
-  console.warn("[recorder] ffmpeg.exe not found in resources/bin — falling back to system PATH");
+  console.warn("[recorder] bundled ffmpeg not found in resources/bin — falling back to system PATH");
   return "ffmpeg";
+}
+
+function resolveAudioInput(ffmpegPath: string): string {
+  if (process.platform === "darwin") return resolveAvfAudioInput();
+  return resolveDshowAudioInput(ffmpegPath);
 }
 
 const classifyError = (err: Error): RecorderError => {
@@ -64,7 +72,7 @@ export const startRecording = (): Result<RecordingSession, RecorderError> => {
 
   try {
     const ffmpegPath = resolveFFmpeg();
-    const audioInput = resolveDshowAudioInput(ffmpegPath);
+    const audioInput = resolveAudioInput(ffmpegPath);
     const proc = spawn(ffmpegPath, buildFfmpegRecordArgs(audioInput), {
       stdio: ["ignore", "pipe", "ignore"],
     });

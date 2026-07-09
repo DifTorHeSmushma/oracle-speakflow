@@ -1,13 +1,13 @@
-// Read-only Windows foreground introspection (Spec §4.2 / Invariant #18).
-// No SetForegroundWindow, no AttachThreadInput, no per-call Add-Type.
-// Single batched call returns hwnd + className + processName together.
+// Read-only foreground introspection (Spec §4.2 / Invariant #18).
+// Windows: PowerShell + user32. macOS: AppleScript. Linux: M7.
 import { spawnSync } from "node:child_process";
+import type { ForegroundInfo } from "./foreground-types.js";
+import { getDarwinForegroundInfo, isDarwinPriorTargetAlive } from "./darwin-window.js";
 
-export type ForegroundInfo = { hwnd: string; className: string; processName: string } | null;
+export type { ForegroundInfo } from "./foreground-types.js";
+export { isDarwinSpeakFlowApp, darwinForegroundMatches } from "./darwin-window.js";
 
 // One-shot PS script: compiles Add-Type once per invocation, returns "|"-delimited result.
-// ~200ms latency per call — acceptable because getForegroundInfo is called at speechStart /
-// keydown (async, non-critical) and at inject time (after Whisper, well within 800ms budget).
 const FOREGROUND_SCRIPT = `
 Add-Type @"
 using System;
@@ -32,13 +32,12 @@ try {
 }
 `.trim();
 
-export function getForegroundInfo(): ForegroundInfo {
-  if (process.platform !== "win32") return null;
+function getWin32ForegroundInfo(): ForegroundInfo | null {
   try {
     const result = spawnSync(
       "powershell",
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", FOREGROUND_SCRIPT],
-      { encoding: "utf8", timeout: 3_000 }
+      { encoding: "utf8", timeout: 3_000 },
     );
     if (result.error || result.status !== 0) {
       const errMsg = result.stderr?.trim() || result.error?.message || `exit ${result.status}`;
@@ -65,6 +64,12 @@ export function getForegroundInfo(): ForegroundInfo {
   }
 }
 
+export function getForegroundInfo(): ForegroundInfo | null {
+  if (process.platform === "win32") return getWin32ForegroundInfo();
+  if (process.platform === "darwin") return getDarwinForegroundInfo();
+  return null;
+}
+
 export function nativeHandleEquals(hwndDecimal: string, nativeBuffer: Buffer): boolean {
   try {
     const hwnd = BigInt(hwndDecimal);
@@ -78,17 +83,25 @@ export function nativeHandleEquals(hwndDecimal: string, nativeBuffer: Buffer): b
   }
 }
 
-// Batch check: returns { foreground, isWindowAlive } in one PS invocation.
-// Used by the yield-focus path (§4.4) to check priorHwndAlive without a
-// separate PS call. checkHwnd must be a decimal HWND string from getForegroundInfo.
 export function getForegroundAndCheckWindow(checkHwnd: string | null): {
-  foreground: ForegroundInfo;
+  foreground: ForegroundInfo | null;
   isWindowAlive: boolean;
 } {
+  if (process.platform === "darwin") {
+    const foreground = getDarwinForegroundInfo();
+    const isWindowAlive = checkHwnd ? isDarwinPriorTargetAlive(checkHwnd) : false;
+    return { foreground, isWindowAlive };
+  }
+
   if (process.platform !== "win32") return { foreground: null, isWindowAlive: false };
+
   let safeCheckHwnd: string = "0";
   if (checkHwnd) {
-    try { safeCheckHwnd = BigInt(checkHwnd).toString(); } catch { /* invalid — keep "0" */ }
+    try {
+      safeCheckHwnd = BigInt(checkHwnd).toString();
+    } catch {
+      /* invalid — keep "0" */
+    }
   }
   const script = `
 Add-Type @"
@@ -119,7 +132,7 @@ try {
     const result = spawnSync(
       "powershell",
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-      { encoding: "utf8", timeout: 3_000 }
+      { encoding: "utf8", timeout: 3_000 },
     );
     if (result.error || result.status !== 0) return { foreground: null, isWindowAlive: false };
     const line = (result.stdout ?? "").trim();
@@ -127,7 +140,7 @@ try {
     const parts = line.split("|");
     if (parts.length < 4) return { foreground: null, isWindowAlive: false };
     const [hwnd, className, processName, alive] = parts;
-    const fg: ForegroundInfo =
+    const fg: ForegroundInfo | null =
       hwnd && className !== undefined && processName !== undefined
         ? { hwnd, className, processName }
         : null;

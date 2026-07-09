@@ -1,7 +1,7 @@
 // Pure-ish foreground tracker — module-local state, testable via injected nowMs.
 // No new native deps: consumes ForegroundInfo already produced by the existing 1s poll (A-4).
 // Wired to the poll in Wave 3; pure logic + tests live here in Wave 1.1.
-import type { ForegroundInfo } from "../utils/win32-window.js";
+import type { ForegroundInfo } from "../utils/foreground-types.js";
 
 export type TrackedTarget = { info: NonNullable<ForegroundInfo>; sampledAtMs: number } | null;
 
@@ -20,7 +20,7 @@ let _lastExternalTarget: TrackedTarget = null;
  * Stores the sample only when it is an external (non-own-window) sample with non-null info.
  */
 export const recordExternalSample = (
-  info: ForegroundInfo,
+  info: ForegroundInfo | null,
   isOwnWindow: boolean,
   nowMs: number,
 ): void => {

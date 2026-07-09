@@ -4,7 +4,9 @@ import { Writable } from "node:stream";
 import { Ok, Err } from "../utils/result.js";
 import type { Result } from "../utils/result.js";
 import { getBinaryPath } from "../utils/binaryPath.js";
+import { resolveBundledBinaryName } from "../utils/binaryNames.js";
 import { resolveDshowAudioInput } from "../utils/dshow-audio.js";
+import { resolveAvfAudioInput } from "../utils/avfoundation-audio.js";
 import type { RecorderError } from "./recorder.js";
 
 // 512 samples × 2 bytes/sample (s16le) = 1024 bytes per frame
@@ -14,8 +16,9 @@ const SAMPLE_RATE = 16_000;
 const RING_BUFFER_FRAMES = 300; // ~9.6 s at 32 ms/frame
 
 function buildFfmpegContinuousArgs(audioInput: string): string[] {
+  const inputFormat = process.platform === "darwin" ? "avfoundation" : "dshow";
   return [
-    "-f", "dshow",
+    "-f", inputFormat,
     "-i", audioInput,
     "-ar", String(SAMPLE_RATE),
     "-ac", "1",
@@ -101,10 +104,15 @@ function buildWavBuffer(s16leData: Buffer): Buffer {
 }
 
 function resolveFFmpeg(): string {
-  const bundled = getBinaryPath("ffmpeg.exe");
+  const bundled = getBinaryPath(resolveBundledBinaryName("ffmpeg"));
   if (existsSync(bundled)) return bundled;
-  process.stderr.write("[capture] ffmpeg.exe not in resources/bin — falling back to PATH\n");
+  process.stderr.write("[capture] bundled ffmpeg not in resources/bin — falling back to PATH\n");
   return "ffmpeg";
+}
+
+function resolveAudioInput(ffmpegPath: string): string {
+  if (process.platform === "darwin") return resolveAvfAudioInput();
+  return resolveDshowAudioInput(ffmpegPath);
 }
 
 function resolveMicGain(): number {
@@ -157,7 +165,7 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
 
   try {
     const ffmpegPath = resolveFFmpeg();
-    const audioInput = resolveDshowAudioInput(ffmpegPath);
+    const audioInput = resolveAudioInput(ffmpegPath);
     if (captureDebug) {
       process.stderr.write(`[capture] device=${audioInput} micGain=${micGain}\n`);
     }
@@ -215,7 +223,7 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
       if (!intentionalStop) {
         process.stderr.write(
           isEnoent
-            ? "[capture] FFmpeg not found — place ffmpeg.exe in resources/bin\n"
+            ? "[capture] FFmpeg not found — install ffmpeg or place bundled binary in resources/bin\n"
             : `[capture] spawn error: ${err.message}\n`
         );
       }

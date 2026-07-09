@@ -13,7 +13,7 @@ import { appendTranscript, readHistory } from "./services/transcript-store.js";
 import { keyboard, Key } from "@nut-tree-fork/nut-js";
 import { isErr, isOk } from "./utils/result.js";
 import { DEFAULT_HOTKEY, formatHotkeyLabel, HOTKEY_CONFIG_VERSION } from "./utils/defaultHotkey.js";
-import { getForegroundInfo, nativeHandleEquals, getForegroundAndCheckWindow, type ForegroundInfo } from "./utils/win32-window.js";
+import { getForegroundInfo, nativeHandleEquals, getForegroundAndCheckWindow, isDarwinSpeakFlowApp, darwinForegroundMatches, type ForegroundInfo } from "./utils/win32-window.js";
 import { recordExternalSample, captureNow, type TrackedTarget } from "./services/foregroundTracker.js";
 import { decideYield } from "./services/yieldFocus.js";
 import { startContinuousCapture, type CaptureSession } from "./services/capture.js";
@@ -85,7 +85,7 @@ let activeHotkey: HotkeyConfig = DEFAULT_HOTKEY;
 
 // Windows: paste target captured at utterance end / inject (Spec §4.5 — read-only, no SetForegroundWindow).
 let pasteTargetHwnd: string | null = null;
-let pasteTargetInfo: ForegroundInfo = null;
+let pasteTargetInfo: ForegroundInfo | null = null;
 
 // ---------------------------------------------------------------------------
 // Local engine state (Wave 2 — §3.6)
@@ -153,16 +153,23 @@ function maybeRelisten(): void {
   }
 }
 
+function isOwnWindowForeground(fg: ForegroundInfo | null, ownHwndBuf: Buffer): boolean {
+  if (!fg) return false;
+  if (process.platform === "win32") return nativeHandleEquals(fg.hwnd, ownHwndBuf);
+  if (process.platform === "darwin") return isDarwinSpeakFlowApp(fg.processName);
+  return false;
+}
+
 // Capture the foreground HWND at record start (speechStart or PTT keydown).
 // Also feeds the foreground tracker for the Wave 3 yield-focus ladder (§4.1).
 // Spec §4.5 / Invariant #18: read-only, never SetForegroundWindow.
 function captureTargetHwnd(): void {
   pasteTargetHwnd = null;
   pasteTargetInfo = null;
-  if (process.platform !== "win32" || !win) return;
+  if ((process.platform !== "win32" && process.platform !== "darwin") || !win) return;
   const fg = getForegroundInfo();
   const ours = win.getNativeWindowHandle();
-  const isOwn = fg ? nativeHandleEquals(fg.hwnd, ours) : false;
+  const isOwn = isOwnWindowForeground(fg, ours);
   // Wave 3: update tracker so decideYield has an external sample at keydown/speechStart.
   recordExternalSample(fg, isOwn, Date.now());
   if (!fg) return;
@@ -183,12 +190,14 @@ function startCallAppPoll(allowlist: string[]): void {
   callAppPollTimer = setInterval(() => {
     // Wave 3 §4.1: piggyback foreground tracker on this 1s poll.
     // Records external (non-SpeakFlow) foreground samples for decideYield at inject time.
-    if (win && process.platform === "win32") {
+    if (win && (process.platform === "win32" || process.platform === "darwin")) {
       const fg = getForegroundInfo();
       const ownHwnd = win.getNativeWindowHandle();
-      const isOwn = fg ? nativeHandleEquals(fg.hwnd, ownHwnd) : false;
+      const isOwn = isOwnWindowForeground(fg, ownHwnd);
       recordExternalSample(fg, isOwn, Date.now());
     }
+
+    if (process.platform !== "win32") return;
 
     exec("tasklist /FO CSV /NH", { timeout: 2_000 }, (_err, stdout) => {
       if (!stdout) return;
@@ -428,14 +437,12 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   // ---------------------------------------------------------------------------
   let finalDecision: ReturnType<typeof decidePaste>;
 
-  if (process.platform === "win32") {
-    // Batch getForegroundInfo + IsWindow(utteranceCapture.hwnd) in one PS call.
+  if (process.platform === "win32" || process.platform === "darwin") {
     const capturedHwnd = utteranceCapture?.info?.hwnd ?? null;
     const { foreground: fg, isWindowAlive: priorAlive } = getForegroundAndCheckWindow(capturedHwnd);
-    const ownHwndEquals = fg ? nativeHandleEquals(fg.hwnd, ownHwndBuf) : false;
+    const ownHwndEquals = isOwnWindowForeground(fg, ownHwndBuf);
 
     if (ownHwndEquals) {
-      // SpeakFlow has focus — run yield-focus decision.
       const plan = decideYield({
         ownHwndEquals,
         captured: utteranceCapture,
@@ -450,16 +457,17 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
       if (plan.action === "clipboardToast") {
         finalDecision = { action: "clipboardToast", reason: plan.reason };
       } else if (plan.action === "yieldThenVerify") {
-        // Yield: hide SpeakFlow so OS re-activates prior z-order window. No SetForegroundWindow (#18).
         win?.hide();
         await new Promise((r) => setTimeout(r, plan.settleMs));
-        // Re-verify: strict HWND equality required (S5/S9).
         const fg1 = getForegroundInfo();
-        if (!fg1 || fg1.hwnd !== plan.expectHwnd) {
+        const verified =
+          process.platform === "win32"
+            ? Boolean(fg1 && fg1.hwnd === plan.expectHwnd)
+            : darwinForegroundMatches(fg1, plan.expectHwnd);
+        if (!verified) {
           console.log(`[INJECT/YIELD] re-verify FAIL fg1=${fg1?.hwnd ?? "null"} expected=${plan.expectHwnd} → clipboard+toast`);
           finalDecision = { action: "clipboardToast", reason: "post-yield foreground mismatch" };
         } else {
-          // Yield succeeded — decidePaste with post-yield foreground (ownHwndEquals: false).
           finalDecision = decidePaste({
             capturedHwnd: plan.expectHwnd,
             capturedForeground: utteranceCapture?.info ?? null,
@@ -472,11 +480,9 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
           console.log(`[INJECT/YIELD] re-verify OK → decidePaste=${finalDecision.action}`);
         }
       } else {
-        // noYield (ownHwndEquals=true should never produce noYield, but handle defensively)
         finalDecision = { action: "clipboardToast", reason: "unexpected noYield when focused" };
       }
     } else {
-      // Normal path: SpeakFlow not focused — existing decidePaste logic.
       const decision = decidePaste({
         capturedHwnd: pasteTargetHwnd,
         capturedForeground: pasteTargetInfo,
@@ -486,18 +492,16 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
         terminalVariantEnabled: termVariant,
         classifier: classifyTarget,
       });
-      // Chat-app fallback: paste even if HWND drifted within the same chat process.
       if (decision.action === "clipboardToast" && fg && !ownHwndEquals && classifyTarget(fg) === "chat") {
         finalDecision = { action: "ctrlV" };
-        console.log(`[INJECT] chat-foreground fallback → ctrlV (${fg.processName})`);
+        console.log(`[INJECT] chat-foreground fallback → paste (${fg.processName})`);
       } else {
         finalDecision = decision;
       }
     }
   } else {
-    // Non-Windows: best-effort paste without foreground introspection.
     const fg = getForegroundInfo();
-    const ownHwndEquals = fg ? nativeHandleEquals(fg.hwnd, ownHwndBuf) : false;
+    const ownHwndEquals = isOwnWindowForeground(fg, ownHwndBuf);
     finalDecision = decidePaste({
       capturedHwnd: pasteTargetHwnd,
       capturedForeground: pasteTargetInfo,
@@ -515,12 +519,18 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   let keystrokeOk = false;
   if (finalDecision.action === "ctrlV") {
     try {
-      await keyboard.pressKey(Key.LeftControl, Key.V);
-      await keyboard.releaseKey(Key.LeftControl, Key.V);
+      if (process.platform === "darwin") {
+        await keyboard.pressKey(Key.LeftSuper, Key.V);
+        await keyboard.releaseKey(Key.LeftSuper, Key.V);
+        console.log("[INJECT] Cmd+V OK");
+      } else {
+        await keyboard.pressKey(Key.LeftControl, Key.V);
+        await keyboard.releaseKey(Key.LeftControl, Key.V);
+        console.log("[INJECT] Ctrl+V OK");
+      }
       keystrokeOk = true;
-      console.log("[INJECT] Ctrl+V OK");
     } catch (err) {
-      console.error(`ERROR: Ctrl+V failed — ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`ERROR: paste keystroke failed — ${err instanceof Error ? err.message : String(err)}`);
     }
   } else if (finalDecision.action === "shiftInsert") {
     try {
