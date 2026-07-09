@@ -32,6 +32,16 @@ Any assistance — buying me a coffee or a donation — is greatly appreciated a
 
 **Workflow diagram:** [Indigo poster](docs/diagrams/Oracle_SpeakFlow_Workflow_Indigo.png) · [Excalidraw source](docs/diagrams/Oracle_SpeakFlow_Workflow_Indigo.excalidraw) · [Study map](docs/diagrams/Oracle_SpeakFlow_Workflow.md)
 
+## Platform support
+
+| Platform | Status | What you get |
+|----------|--------|----------------|
+| **Windows** | ✅ Shipped | NSIS installer (`npm run package`); bundled local Whisper (Fast tier); hands-free + paste |
+| **macOS** | 🟡 Beta (CI-built) | `.dmg` + `.zip` from GitHub Actions **Mac Package** workflow (ad-hoc signed). Cloud transcription works; local Whisper not bundled on Mac yet. If Gatekeeper blocks: right-click → **Open**. |
+| **Linux** | ⏳ In progress (M7) | Ubuntu CI runs tests on every push — **no installable build yet** |
+
+> **Honest scope:** Windows is the full product today. macOS is a **proof build** (launch + cloud transcribe), not full parity. Linux packaging is the next milestone.
+
 ## Current release status
 
 | Milestone | Status | What you get |
@@ -39,9 +49,10 @@ Any assistance — buying me a coffee or a donation — is greatly appreciated a
 | **Phase 3 Pro** | ✅ Shipped on `main` | Electron tray UI, F8 push-to-talk, waveform, MCP bridge, tabbed settings |
 | **Quantum Leap — Wave 2** | ✅ Shipped + smoke-signed | Hands-free VAD (Silero), mute kill-switch, paste guard, HWND focus ladder |
 | **Quantum Leap — Wave 3** | ✅ Shipped + smoke-signed | Voice settings UI, personal dictionary UI, listening indicator, NSIS packaging |
-| **Local intelligence** | ✅ On `main` | Cloud vs Local mode, model downloader, whisper-cli sidecar wiring |
-| **Installer** | ✅ `npm run package` | Windows NSIS (`dist-installer/`), bundled VAD model + ONNX runtime unpack |
-| **macOS build** | Planned | DMG target stubbed; needs cloud Mac CI or local build |
+| **Local intelligence** | ✅ On `main` | Cloud vs Local mode, model downloader, whisper-cli sidecar wiring (Windows) |
+| **Windows installer** | ✅ `npm run package` | NSIS (`dist-installer/`), bundled VAD model + ONNX runtime unpack |
+| **macOS CI build** | ✅ Beta | `mac-package.yml` → DMG/ZIP artifacts; G23-runner bundle verify on cloud Mac |
+| **Linux installer** | ⏳ M7 | Planned — AppImage/deb + native paste/hotkey/mic |
 
 > **Repo visibility:** The GitHub repository may still be **private** during active development. Clone and the Sponsor button work once the repo is public. Support links below work regardless.
 
@@ -178,9 +189,11 @@ See the [workflow diagram](docs/diagrams/Oracle_SpeakFlow_Workflow_Indigo.png) f
 ### Prerequisites
 
 - Node.js **20+**
-- Windows (primary target)
-- FFmpeg on PATH for dev, or `resources/bin/ffmpeg.exe`
-- Groq API key for cloud mode
+- **Windows** — primary dev and ship target
+- **macOS** — CI packages via `Mac Package` workflow; local Mac dev optional
+- **Linux** — CI test matrix only until M7 ships an installer
+- FFmpeg on PATH for dev, or `resources/bin/ffmpeg.exe` (Windows)
+- Groq API key for cloud mode (required on macOS beta; optional on Windows if using local mode)
 
 ### Scripts
 
@@ -249,7 +262,9 @@ See `docs/DESIGN/MILESTONE_3_PRD.md`.
 - [x] **Quantum Leap Wave 3:** Voice + dictionary settings UI, installer bundling
 - [x] **Local intelligence:** Cloud/local mode + model downloader
 - [x] **Visual redesign:** shadcn-svelte Card layout, tabbed Settings Dialog
-- [ ] **macOS:** DMG + cloud CI (repo public recommended)
+- [x] **macOS (M6):** CI-built DMG/ZIP + G23-runner verify — beta, cloud path (proof not parity)
+- [ ] **Linux (M7):** Installable build + native paste/hotkey/mic
+- [ ] **macOS parity (M7):** Native paste, hotkeys, mic, bundled local Whisper
 - [ ] **LLM correction pass:** Opt-in polish (not implemented; adds cost + latency)
 
 ## Contributing
