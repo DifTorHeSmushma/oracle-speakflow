@@ -14,6 +14,7 @@
   import VoiceSettings from "./VoiceSettings.svelte";
   import DictionaryPanel from "./DictionaryPanel.svelte";
   import type { VoiceMode } from "../../src/types/voice.js";
+  import type { ModelTier } from "../../src/types/ipc.js";
   import { DEFAULT_VAD_CONFIG, DEFAULT_CORRECTION_CONFIG } from "../../src/types/voice.js";
 
   const dispatch = createEventDispatcher<{ close: void }>();
@@ -23,6 +24,7 @@
   let language           = "en";
   let verbose            = false;
   let transcriptionMode: "local" | "remote" = "remote";
+  let modelTier: ModelTier = "fast";
   let saved              = false;
   let modelPresent       = true;
   let activeTab          = "voice";
@@ -37,14 +39,39 @@
   let llmCorrectionEnabled = DEFAULT_CORRECTION_CONFIG.llmEnabled;
   let llmLatencyBudgetMs = DEFAULT_CORRECTION_CONFIG.llmLatencyBudgetMs;
 
+  // Hotfix-A: load persisted config on open so Settings reflects actual state.
+  // Previously: transcriptionMode always defaulted to "remote", voice settings
+  // were not populated, causing the "snaps back to Cloud" confusión.
   onMount(async () => {
-    if (window.electronAPI) {
-      modelPresent = await window.electronAPI.checkModel();
-      const voice = await window.electronAPI.getVoiceSettings?.();
-      if (voice) {
-        llmLatencyBudgetMs = voice.correction.llmLatencyBudgetMs;
-      }
+    if (!window.electronAPI) return;
+
+    // Hydrate engine fields from persisted config snapshot.
+    const snapshot = await window.electronAPI.getConfigSnapshot?.();
+    if (snapshot) {
+      transcriptionMode = snapshot.transcriptionMode;
+      model             = snapshot.model;
+      language          = snapshot.language;
+      modelTier         = snapshot.modelTier;
     }
+
+    // Hydrate all voice settings (previously only llmLatencyBudgetMs was loaded).
+    const voice = await window.electronAPI.getVoiceSettings?.();
+    if (voice) {
+      voiceMode                = voice.voiceMode;
+      terminalVariantEnabled   = voice.terminalVariantEnabled;
+      positiveThreshold        = voice.vad.positiveSpeechThreshold;
+      negativeThreshold        = voice.vad.negativeSpeechThreshold;
+      vadMinSpeechFrames       = voice.vad.minSpeechFrames;
+      vadRedemptionFrames      = voice.vad.redemptionFrames;
+      vadPreSpeechPadFrames    = voice.vad.preSpeechPadFrames;
+      llmCorrectionEnabled     = voice.correction.llmEnabled;
+      llmLatencyBudgetMs       = voice.correction.llmLatencyBudgetMs;
+    }
+
+    // Check fast-tier model availability via tier IPC (replaces dead checkModel()).
+    const tiers = await window.electronAPI.getTierStatus?.();
+    const fast = tiers?.find((t) => t.tier === "fast");
+    modelPresent = fast?.available ?? true;
   });
 
   function save(): void {
@@ -67,6 +94,8 @@
           llmLatencyBudgetMs,
         },
       });
+      // Tier is persisted and engine started via select-tier IPC (separate from config-update).
+      window.electronAPI.selectTier?.(modelTier);
     }
     saved = true;
     setTimeout(() => { saved = false; close(); }, 800);

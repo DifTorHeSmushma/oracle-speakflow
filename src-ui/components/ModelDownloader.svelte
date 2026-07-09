@@ -1,6 +1,7 @@
 <script lang="ts">
   /**
-   * P3-T06: Model Downloader — shown when ggml-tiny.en.bin is absent from userData.
+   * Hotfix-B: Model Downloader — shown when the bundled fast-tier model is absent.
+   * Uses downloadTier("fast") (Wave 2 IPC) — downloadModel() was removed (dead).
    * INVARIANT #13: hard-BLOCK on SHA256 mismatch (handled in main process; displayed here).
    */
 
@@ -25,9 +26,16 @@
     });
 
     try {
-      await window.electronAPI.downloadModel();
-      dlState = "done";
-      onDone?.();
+      // Fast tier is bundled — downloadTier("fast") will return { ok: false, error }
+      // if the installer is intact. Surface that error clearly (Invariant #13 / no silent fail).
+      const result = await window.electronAPI.downloadTier("fast");
+      if (!result.ok) {
+        dlState  = "error";
+        errorMsg = result.error ?? "Download failed";
+      } else {
+        dlState = "done";
+        onDone?.();
+      }
     } catch (err) {
       dlState  = "error";
       errorMsg = err instanceof Error ? err.message : String(err);

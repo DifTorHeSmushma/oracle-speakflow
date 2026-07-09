@@ -6,6 +6,28 @@ export type AppState = "IDLE" | "LISTENING" | "RECORDING" | "TRANSCRIBING" | "CO
 
 export type TranscriptionMode = "local" | "remote";
 
+// ---------------------------------------------------------------------------
+// Local model tier types (M6 Wave 1.1 — G16)
+// ---------------------------------------------------------------------------
+
+export type ModelTier = "fast" | "balanced" | "accurate";
+
+/** Main→renderer: tier availability + download state. */
+export type TierStatusPayload = {
+  tier: ModelTier;
+  available: boolean;
+  downloading: boolean;
+  pct: number;
+};
+
+/** Renderer→main: disk check result for a tier. */
+export type DiskCheckPayload = {
+  tier: ModelTier;
+  freeBytes: number;
+  needBytes: number;
+  ok: boolean;
+};
+
 export type StateChangePayload = {
   state: AppState;
   transcript?: string;
@@ -47,4 +69,20 @@ export type DictionaryPayload = Dictionary;
 export type McpToolCallPayload = {
   tool: string;
   calledAt: string;
+};
+
+/** Snapshot of persisted config fields needed to hydrate Settings UI on open. */
+export type ConfigSnapshotPayload = {
+  transcriptionMode: TranscriptionMode;
+  modelTier: ModelTier;
+  model: string;
+  language: string;
+};
+
+/** Dev-only: last pipeline execution summary for offline self-check (D item). */
+export type LastPipelineStatusPayload = {
+  transcriptionMode: TranscriptionMode;
+  modelTier: ModelTier;
+  lastErrorKind: string | null;
+  clipboardWriteRan: boolean;
 };

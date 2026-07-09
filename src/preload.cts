@@ -2,7 +2,7 @@
 // Using .cts (CommonJS TypeScript) guarantees Electron loads this with require(),
 // avoiding all ESM preload edge cases where contextBridge.exposeInMainWorld
 // silently fails to populate window.electronAPI in the renderer.
-import type { StateChangePayload, ConfigUpdatePayload, McpToolCallPayload, VoiceSettingsPayload, DictionaryPayload } from "./types/ipc.js";
+import type { StateChangePayload, ConfigUpdatePayload, McpToolCallPayload, VoiceSettingsPayload, DictionaryPayload, ConfigSnapshotPayload, TierStatusPayload, DiskCheckPayload, ModelTier, LastPipelineStatusPayload } from "./types/ipc.js";
 
 const { contextBridge, ipcRenderer } = require("electron") as typeof import("electron");
 
@@ -59,16 +59,33 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getHotkey: (): Promise<import("./types/ipc.js").HotkeyConfig> => {
     return ipcRenderer.invoke("get-hotkey");
   },
-  // P3-T06: Model downloader
-  checkModel: (): Promise<boolean> => {
-    return ipcRenderer.invoke("check-model");
+  // Hotfix-A: snapshot of persisted config to hydrate Settings UI on open.
+  getConfigSnapshot: (): Promise<ConfigSnapshotPayload | null> => {
+    return ipcRenderer.invoke("get-config-snapshot");
   },
-  downloadModel: (): Promise<void> => {
-    return ipcRenderer.invoke("download-model");
+  // Wave 2 tier IPC (replaces dead check-model / download-model).
+  getTierStatus: (): Promise<TierStatusPayload[]> => {
+    return ipcRenderer.invoke("get-tier-status");
+  },
+  checkDisk: (tier: ModelTier): Promise<DiskCheckPayload> => {
+    return ipcRenderer.invoke("check-disk", tier);
+  },
+  downloadTier: (tier: ModelTier): Promise<{ ok: boolean; error?: string }> => {
+    return ipcRenderer.invoke("download-tier", tier);
+  },
+  cancelTierDownload: (): void => {
+    ipcRenderer.send("cancel-tier-download");
+  },
+  selectTier: (tier: ModelTier): void => {
+    ipcRenderer.send("select-tier", tier);
   },
   onModelDownloadProgress: (callback: (pct: number) => void) => {
     ipcRenderer.on("model-download-progress", (_event, pct: number) => callback(pct));
     return () => { ipcRenderer.removeAllListeners("model-download-progress"); };
+  },
+  // Hotfix-D: dev-only self-check for last pipeline execution.
+  debugLastPipelineStatus: (): Promise<LastPipelineStatusPayload> => {
+    return ipcRenderer.invoke("debug:last-pipeline-status");
   },
   // P3-T12: open allowlisted URL in default browser
   openExternal: (url: string): Promise<void> => {

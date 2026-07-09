@@ -2,7 +2,7 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Result, Ok, Err } from "./result.js";
 import { DEFAULT_HOTKEY, HOTKEY_CONFIG_VERSION } from "./defaultHotkey.js";
-import type { TranscriptionMode } from "../types/ipc.js";
+import type { TranscriptionMode, ModelTier } from "../types/ipc.js";
 import type { VoiceMode, VadConfig, CorrectionConfig } from "../types/voice.js";
 import { DEFAULT_VAD_CONFIG, DEFAULT_CORRECTION_CONFIG } from "../types/voice.js";
 export { DEFAULT_VAD_CONFIG, DEFAULT_CORRECTION_CONFIG } from "../types/voice.js";
@@ -22,11 +22,16 @@ export type Config = {
   correction: CorrectionConfig;
   callAppAllowlist: string[];
   terminalVariantEnabled: boolean;
+  modelTier: ModelTier;
 };
 
 export type ConfigError = { kind: "missingApiKey" } | { kind: "writeFailed"; message: string };
 
-export const CONFIG_VERSION = "3";
+export const CONFIG_V3 = "3";
+export const CONFIG_VERSION = "4";
+
+const atLeast = (current: string | undefined, min: string): boolean =>
+  current !== undefined && parseInt(current, 10) >= parseInt(min, 10);
 
 export const DEFAULT_CALL_APP_ALLOWLIST = ["Zoom.exe", "Teams.exe", "ms-teams.exe", "Discord.exe"];
 
@@ -70,7 +75,7 @@ const migrateHotkeyConfigV2 = (cwd: string): void => {
  * Default voiceMode is "handsFree" (A3 production rule — Spec §7, Gate G12).
  */
 export const migrateConfigV3 = (cwd: string): void => {
-  if (process.env["SPEAKFLOW_CONFIG_VERSION"] === CONFIG_VERSION) return;
+  if (atLeast(process.env["SPEAKFLOW_CONFIG_VERSION"], CONFIG_V3)) return;
 
   const updates: ConfigSave & { configVersion?: string } = {};
 
@@ -88,6 +93,23 @@ export const migrateConfigV3 = (cwd: string): void => {
   }
   if (!process.env["SPEAKFLOW_TERMINAL_VARIANT"]) {
     updates.terminalVariantEnabled = false;
+  }
+
+  updates.configVersion = CONFIG_V3;
+  saveConfig(cwd, updates);
+};
+
+/**
+ * One-time upgrade: adds modelTier="fast" default for new installs and v3→v4 upgrades.
+ * Additive and non-destructive — never removes existing keys. G26.
+ */
+export const migrateConfigV4 = (cwd: string): void => {
+  if (atLeast(process.env["SPEAKFLOW_CONFIG_VERSION"], CONFIG_VERSION)) return;
+
+  const updates: ConfigSave & { configVersion?: string } = {};
+
+  if (!process.env["SPEAKFLOW_MODEL_TIER"]) {
+    updates.modelTier = "fast";
   }
 
   updates.configVersion = CONFIG_VERSION;
@@ -141,6 +163,9 @@ export const saveConfig = (cwd: string, partial: ConfigSave & { configVersion?: 
   if (partial.firstRunExplainerDismissed !== undefined) {
     updates["SPEAKFLOW_FIRST_RUN_DISMISSED"] = String(partial.firstRunExplainerDismissed);
   }
+  if (partial.modelTier !== undefined) {
+    updates["SPEAKFLOW_MODEL_TIER"] = partial.modelTier;
+  }
   if ("configVersion" in partial && partial.configVersion !== undefined) {
     updates["SPEAKFLOW_CONFIG_VERSION"] = partial.configVersion;
   }
@@ -186,6 +211,7 @@ export const loadConfig = (
   loadEnvFile(cwd, opts);
   migrateHotkeyConfigV2(cwd);
   migrateConfigV3(cwd);
+  migrateConfigV4(cwd);
 
   const groqApiKey = process.env["GROQ_API_KEY"]?.trim();
   if (!groqApiKey) return Err({ kind: "missingApiKey" });
@@ -222,6 +248,12 @@ export const loadConfig = (
   const terminalVariantEnabled =
     process.env["SPEAKFLOW_TERMINAL_VARIANT"]?.trim() === "true";
 
+  const modelTierRaw = process.env["SPEAKFLOW_MODEL_TIER"]?.trim();
+  const modelTier: ModelTier =
+    modelTierRaw === "fast" || modelTierRaw === "balanced" || modelTierRaw === "accurate"
+      ? modelTierRaw
+      : "fast";
+
   return Ok({
     groqApiKey,
     hotkey,
@@ -233,5 +265,6 @@ export const loadConfig = (
     correction,
     callAppAllowlist,
     terminalVariantEnabled,
+    modelTier,
   });
 };

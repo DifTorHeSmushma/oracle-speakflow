@@ -3,7 +3,7 @@ import { transcribe } from "../src/services/transcription.js";
 
 // vi.hoisted() runs before vi.mock() hoisting — gives us shared references
 // that are accessible in both the factory and the test body.
-const { mockCreate, MockAPIError, mockSpawnSync, mockExistsSync, mockWriteFileSync, mockReadFileSync, mockUnlinkSync, mockGetBinaryPath } = vi.hoisted(() => {
+const { mockCreate, MockAPIError, mockSpawnSync, mockExistsSync, mockWriteFileSync, mockReadFileSync, mockUnlinkSync, mockGetBinaryPath, mockResolveTierModel } = vi.hoisted(() => {
   const mockCreate = vi.fn();
   const mockSpawnSync = vi.fn();
   const mockExistsSync = vi.fn();
@@ -11,6 +11,7 @@ const { mockCreate, MockAPIError, mockSpawnSync, mockExistsSync, mockWriteFileSy
   const mockReadFileSync = vi.fn();
   const mockUnlinkSync = vi.fn();
   const mockGetBinaryPath = vi.fn();
+  const mockResolveTierModel = vi.fn();
 
   class MockAPIError extends Error {
     status: number;
@@ -21,7 +22,7 @@ const { mockCreate, MockAPIError, mockSpawnSync, mockExistsSync, mockWriteFileSy
     }
   }
 
-  return { mockCreate, MockAPIError, mockSpawnSync, mockExistsSync, mockWriteFileSync, mockReadFileSync, mockUnlinkSync, mockGetBinaryPath };
+  return { mockCreate, MockAPIError, mockSpawnSync, mockExistsSync, mockWriteFileSync, mockReadFileSync, mockUnlinkSync, mockGetBinaryPath, mockResolveTierModel };
 });
 
 // Attach APIError to the constructor so `Groq.APIError` (accessed as a static
@@ -47,6 +48,38 @@ vi.mock("node:fs", () => ({
 
 vi.mock("../src/utils/binaryPath.js", () => ({
   getBinaryPath: mockGetBinaryPath,
+}));
+
+// modelRegistry is mocked so transcribeLocal can be unit-tested without
+// hitting the real SHA-manifest logic (G16 is covered by modelRegistry.test.ts).
+vi.mock("../src/services/modelRegistry.js", () => ({
+  resolveTierModel: mockResolveTierModel,
+  TIER_LADDER: {
+    fast: {
+      tier: "fast",
+      filename: "ggml-tiny.en.bin",
+      sizeBytes: 77_704_715,
+      source: "bundled",
+      minRamMB: 512,
+      batchAcceptable: true,
+    },
+    balanced: {
+      tier: "balanced",
+      filename: "ggml-small.en-q5_1.bin",
+      sizeBytes: 190_098_681,
+      source: "download",
+      minRamMB: 1024,
+      batchAcceptable: false,
+    },
+    accurate: {
+      tier: "accurate",
+      filename: "ggml-large-v3-turbo-q5_0.bin",
+      sizeBytes: 574_041_195,
+      source: "download",
+      minRamMB: 2048,
+      batchAcceptable: false,
+    },
+  },
 }));
 
 describe("transcription service", () => {
@@ -143,10 +176,41 @@ describe("transcription service", () => {
 describe("transcription service (local mode)", () => {
   const dummyBuffer = Buffer.from("fake-wav-data");
   const whisperPath = "C:\\resources\\bin\\whisper-cli.exe";
+  const resolvedModelPath = "C:\\resources\\bin\\ggml-tiny.en.bin";
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetBinaryPath.mockReturnValue(whisperPath);
+    // Default: model resolves OK — tests that need a failure override this.
+    mockResolveTierModel.mockReturnValue({ ok: true, value: resolvedModelPath });
+  });
+
+  it("returns Err(localModelNotFound) when resolveTierModel reports model not found", async () => {
+    mockResolveTierModel.mockReturnValue({
+      ok: false,
+      error: { kind: "modelNotFound", message: "ggml-tiny.en.bin not found in any search dir" },
+    });
+
+    const result = await transcribe("", dummyBuffer, "base", "en", "local");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("localModelNotFound");
+    }
+  });
+
+  it("returns Err(localTranscriptionFailed) on SHA integrity mismatch from resolveTierModel", async () => {
+    mockResolveTierModel.mockReturnValue({
+      ok: false,
+      error: { kind: "modelIntegrity", message: "SHA-256 mismatch for ggml-tiny.en.bin" },
+    });
+
+    const result = await transcribe("", dummyBuffer, "base", "en", "local");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.kind).toBe("localTranscriptionFailed");
+    }
   });
 
   it("returns Err(localModelNotFound) when whisper-cli.exe does not exist", async () => {
@@ -175,6 +239,32 @@ describe("transcription service (local mode)", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toBe("Hello from local whisper");
     expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the resolved model path (not cloud model id) to whisper-cli", async () => {
+    mockExistsSync.mockImplementation((p: string) => p === whisperPath || p.endsWith(".txt"));
+    mockSpawnSync.mockReturnValue({ status: 0, error: null, stderr: Buffer.from("") });
+    mockReadFileSync.mockReturnValue("hello");
+
+    await transcribe("", dummyBuffer, "whisper-large-v3-turbo", "en", "local");
+
+    expect(mockSpawnSync).toHaveBeenCalledWith(
+      whisperPath,
+      expect.arrayContaining(["--model", resolvedModelPath]),
+      expect.any(Object),
+    );
+  });
+
+  it("uses --output-file (not deprecated --output-dir) for whisper-cli v1.9+", async () => {
+    mockExistsSync.mockImplementation((p: string) => p === whisperPath || p.endsWith(".txt"));
+    mockSpawnSync.mockReturnValue({ status: 0, error: null, stderr: Buffer.from("") });
+    mockReadFileSync.mockReturnValue("hello");
+
+    await transcribe("", dummyBuffer, "base", "en", "local");
+
+    const args = mockSpawnSync.mock.calls[0]?.[1] as string[];
+    expect(args).toContain("--output-file");
+    expect(args).not.toContain("--output-dir");
   });
 
   it("returns Err(emptyTranscription) when whisper-cli output is empty", async () => {

@@ -1,4 +1,4 @@
-import type { StateChangePayload, ConfigUpdatePayload, McpToolCallPayload, HotkeyConfig, VoiceSettingsPayload, DictionaryPayload } from "../src/types/ipc.js";
+import type { StateChangePayload, ConfigUpdatePayload, McpToolCallPayload, HotkeyConfig, VoiceSettingsPayload, DictionaryPayload, ConfigSnapshotPayload, TierStatusPayload, DiskCheckPayload, ModelTier, LastPipelineStatusPayload } from "../src/types/ipc.js";
 
 declare global {
   interface Window {
@@ -16,10 +16,17 @@ declare global {
       onMuteChange: (callback: (muted: boolean) => void) => () => void;
       copyToClipboard: (text: string) => void;
       hideWindow: () => void;
-      // P3-T06: Model downloader
-      checkModel: () => Promise<boolean>;
-      downloadModel: () => Promise<void>;
+      // Hotfix-A: config snapshot for Settings UI hydration
+      getConfigSnapshot: () => Promise<ConfigSnapshotPayload | null>;
+      // Wave 2 tier IPC (replaces removed check-model / download-model)
+      getTierStatus: () => Promise<TierStatusPayload[]>;
+      checkDisk: (tier: ModelTier) => Promise<DiskCheckPayload>;
+      downloadTier: (tier: ModelTier) => Promise<{ ok: boolean; error?: string }>;
+      cancelTierDownload: () => void;
+      selectTier: (tier: ModelTier) => void;
       onModelDownloadProgress: (callback: (pct: number) => void) => () => void;
+      // Hotfix-D: dev-only pipeline self-check
+      debugLastPipelineStatus: () => Promise<LastPipelineStatusPayload>;
       // P3-T12: Open allowlisted URL in default browser
       openExternal: (url: string) => Promise<void>;
       getVoiceSettings: () => Promise<VoiceSettingsPayload | null>;

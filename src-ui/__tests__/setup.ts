@@ -17,6 +17,23 @@ function defaultVoiceSettings() {
   };
 }
 
+function defaultConfigSnapshot() {
+  return {
+    transcriptionMode: "remote" as const,
+    modelTier: "fast" as const,
+    model: "whisper-large-v3-turbo",
+    language: "en",
+  };
+}
+
+function defaultTierStatus() {
+  return [
+    { tier: "fast" as const,     available: true,  downloading: false, pct: 0 },
+    { tier: "balanced" as const, available: false, downloading: false, pct: 0 },
+    { tier: "accurate" as const, available: false, downloading: false, pct: 0 },
+  ];
+}
+
 // Mock window.electronAPI globally for all component tests
 const mockElectronAPI = {
   onStateChange: vi.fn(() => vi.fn()), // returns unsubscribe fn
@@ -34,8 +51,20 @@ const mockElectronAPI = {
   getMuteState: vi.fn().mockResolvedValue(false),
   onMuteChange: vi.fn(() => vi.fn()),
   toggleMute: vi.fn().mockResolvedValue(false),
-  checkModel: vi.fn().mockResolvedValue(true),
   hideWindow: vi.fn(),
+  // Hotfix-A/B: tier IPC and config snapshot (replace removed checkModel/downloadModel)
+  getConfigSnapshot: vi.fn().mockResolvedValue(defaultConfigSnapshot()),
+  getTierStatus: vi.fn().mockResolvedValue(defaultTierStatus()),
+  downloadTier: vi.fn().mockResolvedValue({ ok: true }),
+  cancelTierDownload: vi.fn(),
+  selectTier: vi.fn(),
+  onModelDownloadProgress: vi.fn(() => vi.fn()),
+  debugLastPipelineStatus: vi.fn().mockResolvedValue({
+    transcriptionMode: "remote",
+    modelTier: "fast",
+    lastErrorKind: null,
+    clipboardWriteRan: false,
+  }),
 };
 
 function restoreElectronMocks(): void {
@@ -54,8 +83,19 @@ function restoreElectronMocks(): void {
   mockElectronAPI.getMuteState.mockResolvedValue(false);
   mockElectronAPI.onMuteChange.mockImplementation(() => vi.fn());
   mockElectronAPI.toggleMute.mockResolvedValue(false);
-  mockElectronAPI.checkModel.mockResolvedValue(true);
   mockElectronAPI.hideWindow.mockImplementation(() => undefined);
+  mockElectronAPI.getConfigSnapshot.mockResolvedValue(defaultConfigSnapshot());
+  mockElectronAPI.getTierStatus.mockResolvedValue(defaultTierStatus());
+  mockElectronAPI.downloadTier.mockResolvedValue({ ok: true });
+  mockElectronAPI.cancelTierDownload.mockImplementation(() => undefined);
+  mockElectronAPI.selectTier.mockImplementation(() => undefined);
+  mockElectronAPI.onModelDownloadProgress.mockImplementation(() => vi.fn());
+  mockElectronAPI.debugLastPipelineStatus.mockResolvedValue({
+    transcriptionMode: "remote",
+    modelTier: "fast",
+    lastErrorKind: null,
+    clipboardWriteRan: false,
+  });
 }
 
 afterEach(() => {

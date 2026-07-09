@@ -2,9 +2,7 @@ import { app, BrowserWindow, Tray, nativeImage, ipcMain, screen, clipboard, Menu
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
-import { createReadStream, watch, writeFileSync, readFileSync, existsSync, mkdirSync, createWriteStream, unlinkSync, statSync } from "node:fs";
-import { createHash } from "node:crypto";
-import * as https from "node:https";
+import { createReadStream, watch, writeFileSync, readFileSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { exec } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import type { FSWatcher } from "node:fs";
@@ -22,7 +20,11 @@ import { decidePaste, classifyTarget } from "./services/paste.js";
 import { getMuteState, setUserMute, setCallAppMute, setMicBusy, isCallAppActive, onMuteChange } from "./services/mute.js";
 import { correct } from "./services/correction.js";
 import { loadDictionary, saveDictionary as persistDictionary, importDictionary, exportDictionary } from "./services/dictionary.js";
-import type { StateChangePayload, ConfigUpdatePayload, AppState, HotkeyConfig, McpToolCallPayload, VoiceSettingsPayload, DictionaryPayload } from "./types/ipc.js";
+import type { StateChangePayload, ConfigUpdatePayload, AppState, HotkeyConfig, McpToolCallPayload, VoiceSettingsPayload, DictionaryPayload, ModelTier, TierStatusPayload, DiskCheckPayload, ConfigSnapshotPayload, LastPipelineStatusPayload } from "./types/ipc.js";
+import { getBinaryPath, getBundledBinDir } from "./utils/binaryPath.js";
+import { downloadTier, checkDiskForTier } from "./services/modelDownloader.js";
+import { isTierAvailable, resolveTierModel, TIER_LADDER } from "./services/modelRegistry.js";
+import { startEngine, stopEngine, armIdleUnload, type EngineHandle } from "./services/localEngine.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -33,17 +35,6 @@ const MASKED_KEY = "sk-***";
 const WINDOW_WIDTH = 320;
 const WINDOW_HEIGHT = 500;
 
-// ---------------------------------------------------------------------------
-// Model downloader constants (P3-T06)
-// ---------------------------------------------------------------------------
-const MODEL_FILENAME = "ggml-tiny.en.bin";
-const MODEL_URL =
-  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin";
-// TODO(M2-ship): verify full 64-char SHA-256 against official whisper.cpp release page
-// before shipping. CHANGELOG prefix: 921e4cf8…
-// Full hash source: https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-tiny.en.bin
-const MODEL_SHA256 =
-  "921e4cf8686fdd993dcd081a5da5b6c746d2a0cd3b17cf41d6f0d3e2e5a3e5b2";
 // URL allowlist for open-external IPC (P3-T12)
 const EXTERNAL_URL_ALLOWLIST = [
   "https://www.buymeacoffee.com/oraclespeakflow",
@@ -93,6 +84,25 @@ let activeHotkey: HotkeyConfig = DEFAULT_HOTKEY;
 // Windows: paste target captured at utterance end / inject (Spec §4.5 — read-only, no SetForegroundWindow).
 let pasteTargetHwnd: string | null = null;
 let pasteTargetInfo: ForegroundInfo = null;
+
+// ---------------------------------------------------------------------------
+// Local engine state (Wave 2 — §3.6)
+// ---------------------------------------------------------------------------
+let activeEngineHandle: EngineHandle | null = null;
+
+// ---------------------------------------------------------------------------
+// Pipeline status tracker — populated by runPipeline, queried via
+// debug:last-pipeline-status IPC (dev-only offline self-check, Hotfix-D).
+// ---------------------------------------------------------------------------
+let lastPipelineStatus: LastPipelineStatusPayload = {
+  transcriptionMode: "remote",
+  modelTier: "fast",
+  lastErrorKind: null,
+  clipboardWriteRan: false,
+};
+let activeDownloadAbort: AbortController | null = null;
+let activeDownloadTier: ModelTier | null = null;
+let downloadPct = 0;
 
 // ---------------------------------------------------------------------------
 // State helpers
@@ -273,7 +283,11 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
     maybeRelisten();
     return;
   }
-  const { groqApiKey, model, language, transcriptionMode, correction } = liveConfig.value;
+  const { groqApiKey, model, language, transcriptionMode, modelTier, correction } = liveConfig.value;
+  const searchDirs = [getBundledBinDir(), join(configDir, "models")];
+
+  // Reset pipeline status for this run (Hotfix-D self-check).
+  lastPipelineStatus = { transcriptionMode, modelTier, lastErrorKind: null, clipboardWriteRan: false };
 
   // ── TRANSCRIBING ──────────────────────────────────────────────────────────
   transition("TRANSCRIBING");
@@ -282,10 +296,14 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   }
   console.log("transcribing...");
 
-  const textResult = await transcribe(groqApiKey, wavBuffer, model, language, transcriptionMode);
+  const textResult = await transcribe(
+    groqApiKey, wavBuffer, model, language, transcriptionMode,
+    modelTier, searchDirs, activeEngineHandle ?? undefined,
+  );
 
   if (isErr(textResult)) {
     const { error } = textResult;
+    lastPipelineStatus.lastErrorKind = error.kind;
     let errMsg: string;
     switch (error.kind) {
       case "invalidApiKey":
@@ -318,8 +336,17 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
         errMsg = "Transcription failed";
       }
     }
-    resetToIdle(errMsg || undefined);
-    maybeRelisten();
+    // Hotfix-C: hands-free mode must NOT call resetToIdle() followed by maybeRelisten().
+    // resetToIdle() emits IDLE+error; maybeRelisten() immediately emits bare LISTENING,
+    // overwriting the error payload before the renderer can display it. Instead, emit a
+    // single transition carrying the error so the renderer always sees it.
+    pasteTargetHwnd = null;
+    pasteTargetInfo = null;
+    if (voiceMode === "handsFree") {
+      transition("LISTENING", errMsg ? { error: errMsg } : undefined);
+    } else {
+      transition("IDLE", errMsg ? { error: errMsg } : undefined);
+    }
     return;
   }
 
@@ -337,6 +364,7 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   // Write to Electron clipboard (native, no asar path hazard — CLAUDE.md Architecture note).
   try {
     clipboard.writeText(text);
+    lastPipelineStatus.clipboardWriteRan = true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`ERROR: Clipboard write failed — ${message}`);
@@ -621,13 +649,17 @@ function wireMuteHandler(): void {
   onMuteChange((muteState) => {
     console.log(`[MUTE] state → muted=${muteState.muted} reason=${muteState.reason ?? "none"}`);
 
-    // Kill-switch: close mic device (Invariant #19 / Q4)
+    // Kill-switch: close mic device + stop resident engine (Invariant #19 / Q4 / §0 Q2)
     if (muteState.muted && captureSession) {
       stopCallAppPoll();
       vadEvents?.stop();
       vadEvents = null;
       void captureSession.stop().catch(() => {});
       captureSession = null;
+      if (activeEngineHandle) {
+        void stopEngine(activeEngineHandle).catch(() => {});
+        activeEngineHandle = null;
+      }
       const muteMsg =
         muteState.reason === "callApp"
           ? "Mic muted — call app detected (Zoom/Teams/Discord)"
@@ -793,6 +825,19 @@ function setupIpc(): void {
     return { voiceMode, vad, correction, terminalVariantEnabled, firstRunExplainerDismissed };
   });
 
+  // Hotfix-A: snapshot of persisted config fields needed to hydrate Settings UI.
+  // Fixes the "snaps back to Cloud" bug where transcriptionMode/model/language were
+  // never loaded from disk on Settings open — they defaulted to "remote" / hard-coded values.
+  ipcMain.handle("get-config-snapshot", (): ConfigSnapshotPayload | null => {
+    if (!isOk(liveConfig)) return null;
+    const { transcriptionMode, modelTier, model, language } = liveConfig.value;
+    return { transcriptionMode, modelTier, model, language };
+  });
+
+  // Hotfix-D: dev-only self-check — last pipeline execution summary.
+  // Lets us verify offline/local correctness without requiring manual DOM smoke tests.
+  ipcMain.handle("debug:last-pipeline-status", (): LastPipelineStatusPayload => lastPipelineStatus);
+
   ipcMain.handle("get-dictionary", (): DictionaryPayload => {
     const result = loadDictionary(configDir);
     return isOk(result) ? result.value : { version: 1, entries: [] };
@@ -834,92 +879,120 @@ function setupIpc(): void {
     await shell.openExternal(url);
   });
 
-  // P3-T06: Check whether the local model file is present.
-  ipcMain.handle("check-model", (): boolean => {
-    const modelPath = join(configDir, "models", MODEL_FILENAME);
-    const present = existsSync(modelPath);
-    console.log(`[check-model] ${modelPath} → ${present}`);
-    return present;
+  // ---------------------------------------------------------------------------
+  // Tier IPC — Wave 2 (§3.6, §5.2)
+  // ---------------------------------------------------------------------------
+
+  ipcMain.handle("get-tier-status", (): TierStatusPayload[] => {
+    const searchDirs = [getBundledBinDir(), join(configDir, "models")];
+    return (["fast", "balanced", "accurate"] as ModelTier[]).map((tier) => ({
+      tier,
+      available: isTierAvailable(tier, searchDirs),
+      downloading: activeDownloadTier === tier,
+      pct: activeDownloadTier === tier ? downloadPct : 0,
+    }));
   });
 
-  // P3-T06: Download the local Whisper model, report progress, and verify SHA-256.
-  // INVARIANT #13: On hash mismatch, delete the partial file and reject — never silent.
-  ipcMain.handle("download-model", async (): Promise<void> => {
+  ipcMain.handle("check-disk", (_event, tier: ModelTier): DiskCheckPayload => {
     const modelsDir = join(configDir, "models");
-    const modelPath = join(modelsDir, MODEL_FILENAME);
+    const spec = TIER_LADDER[tier];
+    const result = checkDiskForTier(tier, modelsDir);
+    if (!result.ok && result.error.kind === "insufficientDisk") {
+      return { tier, freeBytes: result.error.freeBytes, needBytes: result.error.needBytes, ok: false };
+    }
+    return { tier, freeBytes: 0, needBytes: spec.sizeBytes * 2, ok: true };
+  });
 
-    if (!existsSync(modelsDir)) {
-      mkdirSync(modelsDir, { recursive: true });
+  ipcMain.handle("download-tier", async (_event, tier: ModelTier): Promise<{ ok: boolean; error?: string }> => {
+    if (TIER_LADDER[tier].source === "bundled") {
+      return { ok: false, error: `Tier '${tier}' is bundled — no download needed` };
+    }
+    if (activeDownloadTier !== null) {
+      return { ok: false, error: "Another download is in progress" };
     }
 
+    const modelsDir = join(configDir, "models");
+
+    const diskResult = checkDiskForTier(tier, modelsDir);
+    if (!diskResult.ok && diskResult.error.kind === "insufficientDisk") {
+      const needMB = Math.round(diskResult.error.needBytes / 1024 / 1024);
+      const freeMB = Math.round(diskResult.error.freeBytes / 1024 / 1024);
+      return { ok: false, error: `Insufficient disk space: need ${needMB} MB, have ${freeMB} MB free` };
+    }
+
+    activeDownloadAbort = new AbortController();
+    activeDownloadTier = tier;
+    downloadPct = 0;
+
     const sendProgress = (pct: number): void => {
+      downloadPct = pct;
       win?.webContents.send("model-download-progress", pct);
     };
 
-    await new Promise<void>((resolve, reject) => {
-      const file = createWriteStream(modelPath);
-
-      const cleanup = (err: Error): void => {
-        file.destroy();
-        try { unlinkSync(modelPath); } catch { /* already absent */ }
-        reject(err);
-      };
-
-      https.get(MODEL_URL, (response) => {
-        if (response.statusCode !== 200) {
-          cleanup(new Error(`HTTP ${String(response.statusCode)} downloading model`));
-          return;
+    try {
+      const result = await downloadTier(tier, modelsDir, sendProgress, activeDownloadAbort.signal);
+      if (!result.ok) {
+        if (result.error.kind !== "cancelled") {
+          console.error(`[download-tier] ${tier} failed: ${result.error.kind}`);
         }
+        return { ok: false, error: result.error.kind };
+      }
+      console.log(`[download-tier] ${tier} complete: ${result.value}`);
+      return { ok: true };
+    } finally {
+      activeDownloadTier = null;
+      activeDownloadAbort = null;
+      downloadPct = 0;
+    }
+  });
 
-        const totalBytes = parseInt(response.headers["content-length"] ?? "0", 10);
-        let receivedBytes = 0;
-        let lastReportedPct = -1;
+  ipcMain.on("cancel-tier-download", () => {
+    if (activeDownloadAbort) {
+      activeDownloadAbort.abort();
+      console.log("[cancel-tier-download] download cancelled");
+    }
+  });
 
-        response.on("data", (chunk: Buffer) => {
-          receivedBytes += chunk.length;
-          if (totalBytes > 0) {
-            const pct = Math.floor((receivedBytes / totalBytes) * 100);
-            if (pct !== lastReportedPct) {
-              lastReportedPct = pct;
-              sendProgress(pct);
+  ipcMain.on("select-tier", (_event, tier: ModelTier) => {
+    if (!isOk(liveConfig)) return;
+    const prevTier = liveConfig.value.modelTier;
+
+    // Stop current engine when switching tiers (Spec §3.6)
+    if (activeEngineHandle && tier !== prevTier) {
+      void stopEngine(activeEngineHandle).catch(() => {});
+      activeEngineHandle = null;
+    }
+
+    const saveResult = saveConfig(configDir, { modelTier: tier });
+    if (isErr(saveResult)) {
+      console.error(`[select-tier] config save failed: ${saveResult.error.kind}`);
+      return;
+    }
+    liveConfig = loadConfig(configDir, { envOverride: true });
+    console.log(`[select-tier] tier → ${tier}`);
+
+    // Proactively start engine for non-batch tiers if the model is available
+    const spec = TIER_LADDER[tier];
+    if (!spec.batchAcceptable) {
+      const searchDirs = [getBundledBinDir(), join(configDir, "models")];
+      const modelResult = resolveTierModel(tier, searchDirs);
+      if (modelResult.ok) {
+        startEngine(tier, modelResult.value)
+          .then((engineResult) => {
+            if (engineResult.ok) {
+              activeEngineHandle = engineResult.value;
+              armIdleUnload(activeEngineHandle, 5 * 60_000, () => {
+                console.log(`[engine] idle-unload ${tier}`);
+                activeEngineHandle = null;
+              });
+              console.log(`[engine] started for tier ${tier} (pid ${activeEngineHandle.pid})`);
+            } else {
+              console.error(`[engine] start failed for ${tier}: ${engineResult.error.kind} — ${engineResult.error.message}`);
             }
-          }
-        });
-
-        response.pipe(file);
-
-        file.on("finish", () => {
-          file.close(() => {
-            // Verify SHA-256 — INVARIANT #13: hard-block on mismatch
-            const hash = createHash("sha256");
-            const readStream = createReadStream(modelPath);
-            readStream.on("data", (chunk) => hash.update(chunk));
-            readStream.on("end", () => {
-              const computed = hash.digest("hex");
-              if (computed !== MODEL_SHA256) {
-                console.error(
-                  `[download-model] SHA-256 MISMATCH — expected ${MODEL_SHA256}, got ${computed}`
-                );
-                try { unlinkSync(modelPath); } catch { /* ignore */ }
-                reject(
-                  new Error(
-                    "SHA-256 mismatch — download may be corrupted. File deleted. Please retry."
-                  )
-                );
-                return;
-              }
-              console.log(`[download-model] SHA-256 OK (${computed.slice(0, 16)}…)`);
-              sendProgress(100);
-              resolve();
-            });
-            readStream.on("error", cleanup);
-          });
-        });
-
-        file.on("error", cleanup);
-        response.on("error", cleanup);
-      }).on("error", cleanup);
-    });
+          })
+          .catch((err: unknown) => console.error("[engine] unexpected start error:", err));
+      }
+    }
   });
 }
 
@@ -1303,6 +1376,11 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
       // Fire-and-forget cleanup; Electron will wait for the event loop to drain
       captureSession.stop().catch(() => {});
     }
+    // Stop resident engine — Invariant #8 (async cleanup on shutdown)
+    if (activeEngineHandle) {
+      void stopEngine(activeEngineHandle).catch(() => {});
+      activeEngineHandle = null;
+    }
     mcpWatcher?.close();
   });
 
@@ -1311,6 +1389,10 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
     uIOhook.stop();
     stopCallAppPoll();
     vadEvents?.stop();
+    if (activeEngineHandle) {
+      void stopEngine(activeEngineHandle).catch(() => {});
+      activeEngineHandle = null;
+    }
     if (captureSession) {
       captureSession.stop().finally(() => app.quit());
     } else {

@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
@@ -50,11 +50,30 @@ export type ModelVerifyError =
 /**
  * Resolves model path and verifies its SHA-256 against models.sha256 manifest.
  * Hard-blocks on mismatch — Invariant #13 parity (no silent fallback).
+ *
+ * When `searchDirs` is provided, searches each directory in order and uses the
+ * first file found. When omitted, falls back to the single bundled path from
+ * `getBinaryPath` (backward-compatible with the original single-dir behavior).
+ *
+ * The manifest is always loaded from the bundled path (resources/bin/models.sha256).
  */
-export function getVerifiedModelPath(name: string): Result<string, ModelVerifyError> {
-  const modelPath = getBinaryPath(name);
-  if (!existsSync(modelPath)) {
-    return Err({ kind: "modelNotFound", message: `Model not found at path: ${modelPath}` });
+export function getVerifiedModelPath(name: string, searchDirs?: string[]): Result<string, ModelVerifyError> {
+  let modelPath: string;
+
+  if (searchDirs === undefined) {
+    modelPath = getBinaryPath(name);
+    if (!existsSync(modelPath)) {
+      return Err({ kind: "modelNotFound", message: `Model not found at path: ${modelPath}` });
+    }
+  } else {
+    const found = searchDirs.map((d) => join(d, name)).find((p) => existsSync(p));
+    if (!found) {
+      return Err({
+        kind: "modelNotFound",
+        message: `Model '${name}' not found in: ${searchDirs.join(", ")}`,
+      });
+    }
+    modelPath = found;
   }
 
   const manifestPath = getBinaryPath("models.sha256");
@@ -77,6 +96,11 @@ export function getVerifiedModelPath(name: string): Result<string, ModelVerifyEr
   }
 
   return Ok(modelPath);
+}
+
+/** Returns the directory that contains bundled binaries (resources/bin). */
+export function getBundledBinDir(): string {
+  return dirname(getBinaryPath("placeholder"));
 }
 
 function parseManifestEntry(manifest: string, name: string): string | null {

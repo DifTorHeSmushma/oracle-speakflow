@@ -2,8 +2,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["tests/**/*.test.ts"],
-    // Exclude Playwright-based integration tests — those run via `npm run test:integration`
+    include: ["tests/**/*.test.ts", "src/**/__tests__/**/*.test.ts"],
+    // Exclude Playwright-based integration tests and Svelte UI tests
     exclude: ["src-ui/**", "tests/integration/**"],
   },
 });

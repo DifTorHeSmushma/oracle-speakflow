@@ -11,6 +11,7 @@
     "build:ui": "vite build",
     "start:app": "npm run build && npm run build:ui && electron dist/electron-main.js",
     "start:electron": "electron dist/electron-main.js",
+    "check:manifest": "node scripts/check-manifest.mjs",
     "test": "vitest run --config vitest.config.ts",
     "test:ui": "vitest run --config vitest.ui.config.ts",
     "test:watch": "vitest",
@@ -90,8 +91,13 @@
       "perMachine": false
     },
     "mac": {
-      "target": ["dmg"],
-      "category": "public.app-category.productivity"
+      "identity": null,
+      "target": [
+        { "target": "dmg" },
+        { "target": "zip" }
+      ],
+      "category": "public.app-category.productivity",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     }
   }
 }

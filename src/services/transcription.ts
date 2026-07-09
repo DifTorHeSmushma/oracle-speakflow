@@ -6,7 +6,9 @@ import { randomUUID } from "node:crypto";
 import Groq from "groq-sdk";
 import { Result, Ok, Err } from "../utils/result.js";
 import { getBinaryPath } from "../utils/binaryPath.js";
-import type { TranscriptionMode } from "../types/ipc.js";
+import { resolveTierModel, TIER_LADDER } from "./modelRegistry.js";
+import { transcribeWarm, type EngineHandle } from "./localEngine.js";
+import type { TranscriptionMode, ModelTier } from "../types/ipc.js";
 
 export type { TranscriptionMode };
 
@@ -103,19 +105,50 @@ const transcribeRemote = async (
 };
 
 // ---------------------------------------------------------------------------
-// Local transcription (whisper-cli.exe sidecar)
+// Local transcription
+//   Fast tier  → whisper-cli.exe spawnSync (batch, model held in verified path)
+//   Balanced/Accurate → transcribeWarm via resident whisper-server handle
+// Invariant #13 / C-2 / L5: pre-flight SHA-verifies before every run.
+//   NEVER falls through to cloud on local failure (no silent cloud).
 // ---------------------------------------------------------------------------
 
-const transcribeLocal = (
+const transcribeLocal = async (
   audioBuffer: Buffer,
-  model: string,
-  language: string
-): Result<string, TranscriptionError> => {
+  tier: ModelTier,
+  language: string,
+  searchDirs?: string[],
+  engineHandle?: EngineHandle,
+): Promise<Result<string, TranscriptionError>> => {
+  const spec = TIER_LADDER[tier];
+
+  // Pre-flight: resolve and SHA-verify the model — Invariant #13 / C-2 / G16.
+  const modelResult = resolveTierModel(tier, searchDirs);
+  if (!modelResult.ok) {
+    const { error } = modelResult;
+    if (error.kind === "modelIntegrity") {
+      return Err({ kind: "localTranscriptionFailed", message: error.message });
+    }
+    return Err({ kind: "localModelNotFound", message: error.message });
+  }
+  const modelPath = modelResult.value;
+
+  // Resident path (Balanced/Accurate) — delegates to whisper-server via handle.
+  if (!spec.batchAcceptable) {
+    if (!engineHandle) {
+      return Err({
+        kind: "localTranscriptionFailed",
+        message: `No engine handle for tier '${tier}' — select the tier to start the engine`,
+      });
+    }
+    return transcribeWarm(engineHandle, audioBuffer);
+  }
+
+  // Fast batch path — whisper-cli spawnSync with the SHA-verified model path.
   const whisperPath = getBinaryPath("whisper-cli.exe");
   if (!existsSync(whisperPath)) {
     return Err({
       kind: "localModelNotFound",
-      message: `whisper-cli.exe not found at ${whisperPath} — place the binary in resources/bin/`,
+      message: `whisper-cli.exe not found at ${whisperPath}`,
     });
   }
 
@@ -126,12 +159,13 @@ const transcribeLocal = (
   try {
     writeFileSync(wavPath, audioBuffer);
 
+    const outputBase = join(tmpDir, `speakflow-${id}`);
     const result = spawnSync(whisperPath, [
       wavPath,
-      "--model", model,
+      "--model", modelPath,
       "--language", language,
       "--output-txt",
-      "--output-dir", tmpDir,
+      "--output-file", outputBase,
     ], { timeout: 60_000 });
 
     if (result.error) {
@@ -151,8 +185,8 @@ const transcribeLocal = (
       });
     }
 
-    // whisper-cli --output-txt writes <input-basename>.txt in the output directory
-    const txtPath = join(tmpDir, `speakflow-${id}.txt`);
+    // whisper-cli v1.9+ writes <output-file>.txt (not <wav-basename>.wav.txt)
+    const txtPath = `${outputBase}.txt`;
     if (!existsSync(txtPath)) {
       try { unlinkSync(wavPath); } catch { /* ignore */ }
       return Err({
@@ -180,6 +214,7 @@ const transcribeLocal = (
 
 // ---------------------------------------------------------------------------
 // Public API — mode-aware entrypoint
+// Tier and searchDirs are ignored in remote mode.
 // ---------------------------------------------------------------------------
 
 export const transcribe = async (
@@ -187,10 +222,13 @@ export const transcribe = async (
   audioBuffer: Buffer,
   model: string,
   language: string,
-  mode: TranscriptionMode = "remote"
+  mode: TranscriptionMode = "remote",
+  tier: ModelTier = "fast",
+  searchDirs?: string[],
+  engineHandle?: EngineHandle,
 ): Promise<Result<string, TranscriptionError>> => {
   if (mode === "local") {
-    return transcribeLocal(audioBuffer, model, language);
+    return transcribeLocal(audioBuffer, tier, language, searchDirs, engineHandle);
   }
   return transcribeRemote(apiKey, audioBuffer, model, language);
 };

@@ -23,6 +23,12 @@ architect/
 # Local spikes, logs, and experiments
 scratch/
 
+# Bundled binaries/models are local-only; keep manifest + small assets tracked
+resources/bin/*
+!resources/bin/.gitkeep
+!resources/bin/models.sha256
+!resources/bin/silero_vad.onnx
+
 # Local-only planning (never publish to GitHub)
 MACOS_BUILD_PRIVATE.md
 docs/architect-knowledge-pack.md

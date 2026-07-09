@@ -48,8 +48,8 @@ Electron's `require()` patching. Do not route Electron paste through `injector.t
    returns `Err({ kind: "recordingFailed", message: "Already stopped" })` immediately.
 8. **Async cleanup on shutdown** — SIGINT handler must `await session.stop()` (via `.finally()`)
    before calling `process.exit(0)`. Never exit while an FFmpeg process may still be running.
-13. **Local-First by Default** — If a local model (whisper-cli sidecar) is available, use it. Only fall back to Groq if explicitly requested or if local fails.
-15. **Zero-Friction Bundling** — All binaries (ffmpeg.exe, whisper-cli.exe) must be bundled in `app.asar.unpacked` via `extraResources`. Never require the user to run `winget` or `brew`.
+13. **Local-First by Default** — If a local model (whisper-cli sidecar) is available, use it. Only fall back to Groq if explicitly requested or if local fails. Per-tier SHA manifest gate (`resources/bin/models.sha256`) is enforced before every engine start and every transcription — **no unverified hash ever runs** (no-unverified-hash release rule; `scripts/check-manifest.mjs` is release-blocking).
+15. **Zero-Friction Bundling** — `whisper-cli.exe` + `whisper-server.exe` are bundled via `extraResources` (`resources/bin/`). The Fast tier model (`ggml-tiny.en.bin`) ships in the installer. Balanced/Accurate models are one-click SHA-gated downloads to `userData/models`. Never require the user to run `winget` or `brew`, and never place binaries manually in production.
 16. **UI Component Density** — No single Svelte component shall exceed 250 lines. Use composition over massive files.
 17. **Single mic owner** — FFmpeg (main process) is the sole microphone consumer. The renderer must never call `getUserMedia`. VAD consumes FFmpeg's PCM stream; it must not open a second device handle.
 18. **Never steal foreground** — the pipeline must never call `SetForegroundWindow`/`AttachThreadInput`; the tray uses `showInactive` only. Paste lands in the already-focused window or degrades to clipboard+toast.
@@ -93,9 +93,7 @@ IDLE ──(key DOWN + modifiers)──► RECORDING ──(key UP)──► TRA
 - **FFmpeg** (audio recording): bundled at `resources/bin/ffmpeg.exe`, falls back to system PATH.
   DirectShow input uses Windows GUID form (`audio=@device_cm_{33D9A762-...}\wave:{...}`) rather than
   `audio=<name>` — the GUID is layout-independent and matches any default Windows audio device.
-- **whisper-cli.exe** (local transcription sidecar): bundled at `resources/bin/whisper-cli.exe`.
-  Invoked with `--output-txt --output-dir <tmpdir>`; output file is `<input-basename>.txt` in that dir.
-  Binary placed manually (see `resources/bin/.gitkeep`); not auto-downloaded.
+- **whisper-cli.exe** (local transcription sidecar): **bundled** via `extraResources` (`resources/bin/whisper-cli.exe` + `whisper-server.exe`). Fast tier `ggml-tiny.en.bin` ships in the installer; Balanced/Accurate are one-click SHA-gated downloads to `userData/models`. `whisper-cli.exe` v1.9+ is invoked with `--output-txt --output-file <tmpdir>/speakflow-<id>`; output file is `<output-file>.txt`. `whisper-server.exe` is the resident HTTP inference server for Balanced/Accurate tiers (loopback, warm model). All tier models are verified against `resources/bin/models.sha256` before use.
 - **groq-sdk v0.7**: `audio.transcriptions.create({ response_format: "text" })` returns a plain
   `string` at runtime but the TS types declare `Transcription`. Use `response as unknown as string`
   with a comment explaining the SDK gap.

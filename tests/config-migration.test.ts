@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadConfig, migrateConfigV3, CONFIG_VERSION, DEFAULT_CALL_APP_ALLOWLIST } from "../src/utils/config.js";
+import { loadConfig, migrateConfigV3, CONFIG_VERSION, CONFIG_V3, DEFAULT_CALL_APP_ALLOWLIST } from "../src/utils/config.js";
 import { HOTKEY_CONFIG_VERSION } from "../src/utils/defaultHotkey.js";
 import { isOk } from "../src/utils/result.js";
 
@@ -13,6 +13,7 @@ const VOICE_ENV_KEYS = [
   "SPEAKFLOW_CORRECTION",
   "SPEAKFLOW_CALL_APP_ALLOWLIST",
   "SPEAKFLOW_TERMINAL_VARIANT",
+  "SPEAKFLOW_MODEL_TIER",
 ] as const;
 
 const ALL_ENV_KEYS = [
@@ -59,7 +60,7 @@ describe("config migration v3 — G12", () => {
     migrateConfigV3(dir);
 
     const content = readFileSync(join(dir, ".env"), "utf-8");
-    expect(content).toContain(`SPEAKFLOW_CONFIG_VERSION=${CONFIG_VERSION}`);
+    expect(content).toContain(`SPEAKFLOW_CONFIG_VERSION=${CONFIG_V3}`);
   });
 
   it("new install: loadConfig returns voiceMode='handsFree'", () => {
