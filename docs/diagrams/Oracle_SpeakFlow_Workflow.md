@@ -4,6 +4,13 @@
 
 **Palette:** [color-palette.md](./color-palette.md)
 
+**Regenerate PNG after editing `.excalidraw`:**
+
+```bash
+python docs/diagrams/patch_workflow_m6.py   # only if re-applying M6 text map
+node docs/diagrams/export_workflow_png.mjs
+```
+
 ---
 
 ## Legend
@@ -11,8 +18,8 @@
 | Color | Meaning |
 |-------|---------|
 | Indigo | Capture layer — FFmpeg, Silero VAD, mic gain |
-| Purple | Intelligence — Groq / local Whisper, dictionary correction |
-| Green | Delivery — HWND guard, Ctrl+V paste, clipboard fallback |
+| Purple | Intelligence — Groq / local Whisper, tier ladder, dictionary correction |
+| Green | Delivery — yield-focus guard, Ctrl+V paste, clipboard fallback |
 | Red square | Mute button — mic device closed |
 | Square cards | State machine steps |
 
@@ -24,9 +31,9 @@ Three **equal** circles arranged in a triangle — each centre is the same dista
 
 | Position | Layer | Role |
 |----------|-------|------|
-| Top | **INTELLIGENCE** | Groq / local Whisper, personal dictionary |
+| Top | **INTELLIGENCE** | Groq cloud or bundled whisper-cli (Windows), 3-tier ladder, personal dictionary |
 | Lower left | **CAPTURE** | FFmpeg DirectShow, Silero VAD, mic gain |
-| Lower right | **DELIVERY** | HWND guard, Ctrl+V, clipboard fallback |
+| Lower right | **DELIVERY** | Yield-focus guard, Ctrl+V, clipboard fallback |
 
 Each utterance flows through all three in one pipeline pass.
 
@@ -38,20 +45,32 @@ Each utterance flows through all three in one pipeline pass.
 |-------|----------------|
 | **LISTENING** | Hands-free armed; VAD watching; mic open |
 | **RECORDING** | Speech detected; ring buffer active |
-| **TRANSCRIBING** | Audio sent to Whisper |
-| **CORRECTING** | Personal dictionary pass (diamond) |
-| **INJECTING** | Paste into focused text field |
+| **TRANSCRIBING** | Groq cloud or local whisper-cli; tier picker (Fast / Balanced / Accurate) |
+| **CORRECTING** | Personal dictionary pass (spoken → written) |
+| **INJECTING** | Paste into focused text field (yield-focus; clipboard if SpeakFlow focused) |
 | **→ LISTEN** | Loop back (hands-free primary) |
 
 **Mute button:** Mute bar or tray → FFmpeg stops, mic released (OS indicator dark).
 
 **PTT fallback:** Hold F8 anytime — same pipeline, keyed start/stop instead of VAD.
 
+**Paste tip (M6):** User must **focus the target app before speaking**. If SpeakFlow's own window is focused, text goes to clipboard — not the wrong window.
+
+---
+
+## Platforms (M6)
+
+| Platform | Status |
+|----------|--------|
+| **Windows** | Shipped — bundled Fast tier, offline local |
+| **macOS** | Beta — CI `.dmg`/`.zip`, cloud transcribe only |
+| **Linux** | M7 — CI tests only, no installer yet |
+
 ---
 
 ## Eye path
 
-Title → L1 summary strip → triangle Venn → state timeline → evidence cards → developer card + Buy Me a Coffee → footer loop → legend.
+Title → L1 summary strip → triangle Venn → state timeline → evidence cards → platform/user-tips card → footer loop → legend.
 
 ---
 

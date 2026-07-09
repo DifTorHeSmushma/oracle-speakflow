@@ -42,6 +42,90 @@ Any assistance — buying me a coffee or a donation — is greatly appreciated a
 
 > **Honest scope:** Windows is the full product today. macOS is a **proof build** (launch + cloud transcribe), not full parity. Linux packaging is the next milestone.
 
+## User guide
+
+For **Windows installer** or **macOS beta** testers — no coding required.
+
+### Install
+
+| Platform | How |
+|----------|-----|
+| **Windows** | Run `Oracle SpeakFlow Setup *.exe` from `dist-installer/` (or ask your builder for the installer file). |
+| **macOS beta** | Download the `.zip` artifact from a **Mac Package** CI run. Unzip → right-click **Oracle SpeakFlow.app** → **Open** (Gatekeeper may block on first launch). |
+
+SpeakFlow runs from the **system tray**. Click the tray icon to open the panel.
+
+### First-run setup (Groq API key)
+
+Required for **cloud mode** (default). Required on **macOS beta** (local Whisper is not bundled on Mac yet).
+
+1. Click the **tray icon** → **Settings** (top-right of the panel).
+2. Open the **Account** tab.
+3. Enter your Groq API key → save.
+4. Get a free key at https://console.groq.com/
+
+Your key is stored locally in `%APPDATA%\oracle-speakflow\.env` (Windows) — never in the repo.
+
+Click **Save** at the bottom of Settings when you change Voice or Engine tabs. The **Dictionary** tab saves each entry automatically when you click **Add**.
+
+### Daily use
+
+1. Click the **tray icon** to open SpeakFlow (you can leave it open or close it — listening continues from the tray).
+2. Click into the **text field** where you want dictation (Notepad, browser, IDE, chat, email, etc.).
+3. **Speak naturally** (hands-free — VAD detects start/stop) **or** hold **F8** → speak → release.
+4. Corrected text is **pasted into the focused app**.
+5. Click the **mute bar** (below the status area) before calls or when you need privacy.
+
+**Important — paste tip:** SpeakFlow pastes into **whatever app already has focus**. If the **SpeakFlow window** is focused when you finish speaking, text may **not** paste into your editor — it goes to the **clipboard** with a toast instead. **Click your target app first**, then speak.
+
+**Alt-tab safety:** If you switch apps mid-utterance, text goes to the **clipboard** — never the wrong window. Press Ctrl+V where you want it.
+
+### Personal dictionary (fix words Whisper gets wrong)
+
+Use this for names, commands, and phrases you say often.
+
+1. Tray icon → **Settings** → **Dictionary** tab.
+2. **Spoken** — what Whisper tends to hear (e.g. `npm run type check`).
+3. **Written** — what you want pasted (e.g. `npm run typecheck`).
+4. **Match mode:**
+   - **Phrase** — replaces the spoken text anywhere it appears in the transcript (best for multi-word commands).
+   - **Whole word** — only replaces when the spoken text is a complete word (best for names like `TypeScript` vs `typescript`).
+5. Click **Add** — saves immediately.
+6. Use the **checkbox** to temporarily disable an entry; **✕** to delete.
+7. **Export JSON** / **Import JSON** — backup or move your dictionary between machines.
+
+Dictionary runs **after** transcription, **before** paste. Entries are stored in `%APPDATA%\oracle-speakflow\dictionary.json` and survive app upgrades.
+
+### Engine: cloud vs local (Windows)
+
+| Mode | When to use |
+|------|-------------|
+| **Cloud (Groq)** | Default. Fast, low latency. Needs internet + API key. |
+| **Local (Whisper)** | Offline. Bundled on the **Windows installer** — no manual `whisper-cli` download. |
+
+**Switch to local (Windows installer):**
+
+1. Settings → **Engine** tab.
+2. Select **Local (Whisper)**.
+3. Pick a **model tier:**
+   - **Fast** — bundled with the installer (~78 MB). Works offline out of the box.
+   - **Balanced** / **Accurate** — click **Download** in the tier picker (one-time, SHA-verified).
+4. Click **Save** at the bottom of Settings.
+5. Focus your target app → speak as usual.
+
+**macOS beta:** use **Cloud (Groq)** only for now. Local Whisper is not bundled on Mac (M7).
+
+### Voice settings (optional)
+
+Settings → **Voice** tab:
+
+- **Hands-free** vs **Push-to-talk (F8)**
+- VAD sensitivity sliders (if hands-free cuts off too early or too late)
+- **Terminal paste mode** — uses Shift+Insert in terminals instead of Ctrl+V
+- Hotkey editor (default **F8**)
+
+Click **Save** after changes.
+
 ## Current release status
 
 | Milestone | Status | What you get |
@@ -144,12 +228,16 @@ Equivalent manual steps: `npm run build && npm run build:ui && npm run start:ele
 
 **Alt-tab safety:** Stay in your target window while speaking. If you switch apps mid-utterance, text goes to the **clipboard** with a toast — never the wrong window. Press Ctrl+V where you want it.
 
-### Local mode
+### Local mode (developers — from source)
+
+If you run from `git clone` / `npm run start:app` (not the Windows installer):
 
 1. Settings → **Engine** → **Local (Whisper)**.
-2. **Download Model** (first time).
-3. Place **`whisper-cli.exe`** in `resources/bin/` (not downloaded by the app).
-4. Use hands-free or F8 as usual.
+2. **Fast tier** — bundled when you run `npm run package`; for dev, place `whisper-cli.exe` and `ggml-tiny.en.bin` in `resources/bin/` (see `docs/DESIGN/`).
+3. Larger tiers — **Download** in the tier picker (Settings → Engine).
+4. Click **Save** → focus target app → speak.
+
+**Windows installer users:** skip the manual `resources/bin/` step — engine + Fast model are already bundled.
 
 ### Windows installer
 
@@ -250,8 +338,10 @@ See `docs/DESIGN/MILESTONE_3_PRD.md`.
 |---------|-------------|
 | UI looks old / no waveform | `npm run start:app` after `git pull`; kill stale `electron.exe` |
 | “Sometimes works, sometimes not” | One instance only (tray → Quit); check `.env` for API key |
-| Paste goes to wrong window | Focus target field before speaking; alt-tab → clipboard fallback |
-| Local mode fails | Download model in Settings; add `whisper-cli.exe` to `resources/bin/` |
+| Paste goes to wrong window | Focus target field **before** speaking; alt-tab → clipboard fallback |
+| Nothing pastes when SpeakFlow window is focused | Click your editor/chat first — paste targets the **focused** app, not SpeakFlow |
+| Local mode fails (installer) | Settings → Engine → Local; ensure **Fast** tier shows available; click **Save** |
+| Local mode fails (dev clone) | Add `whisper-cli.exe` + model to `resources/bin/` or use **Download** for tiers |
 | Old installed `.exe` shows stale UI | Uninstall `%LOCALAPPDATA%\Programs\Oracle SpeakFlow\`; use dev launch |
 
 ## Roadmap

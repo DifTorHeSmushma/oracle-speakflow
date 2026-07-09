@@ -12,6 +12,14 @@ Publication-grade architecture poster (indigo tech dark branding).
 
 Indigo uses an **equilateral triangle Venn** — three equal circles interwoven at a shared hub.
 
+**Regenerate PNG** after editing the `.excalidraw` source:
+
+```bash
+node docs/diagrams/export_workflow_png.mjs
+```
+
+M6 text patches (optional re-apply): `python docs/diagrams/patch_workflow_m6.py`
+
 ## Palette
 
 See [color-palette.md](./color-palette.md).
