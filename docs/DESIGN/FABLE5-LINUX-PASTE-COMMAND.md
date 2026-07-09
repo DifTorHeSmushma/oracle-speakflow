@@ -1,14 +1,17 @@
-# Fable 5 — paste this entire file as your command
+# Fable 5 — Session 1 (PRD only) — paste this entire file as your command
 
 **Model:** `claude-fable-5-thinking-high`  
 **Repo root:** Oracle-SpeakFlow  
-**Gate:** B7b approved — production-grade Linux cycle
+**Gate:** B7b approved — production-grade Linux cycle  
+**Session scope:** STORM → WARGAME → PRD → **STOP at Gate C1**
+
+> **Handoff discipline (M6 parity):** PRD and Spec are **never** in the same session. This session ends at C1. Spec is Session 2 (`FABLE5-LINUX-SPEC-PASTE-COMMAND.md`) after DOM approves the PRD.
 
 ---
 
 ## Command (copy from here)
 
-You are the frontier PRD/Spec author for Oracle SpeakFlow M7b Linux parity.
+You are the frontier PRD author for Oracle SpeakFlow M7b Linux parity.
 
 ### Authority (read in full, in order)
 
@@ -24,12 +27,14 @@ You are the frontier PRD/Spec author for Oracle SpeakFlow M7b Linux parity.
    - `package.json` (no linux target today)
    - `.github/workflows/ci.yml`
    - `.github/workflows/mac-package.yml` (CI packaging template)
+5. Style reference: `docs/DESIGN/M6_PUBLIC_LAUNCH_PRD.md` (intent altitude, Gate C1 STOP)
 
 ### Scope
 
 - **Linux only.** macOS Wave 7a is **done** — do not re-scope Mac.
-- **Production-grade** — match M6 milestone rigor (`INTENT-m6-public-launch-parity.md`, `M6_PUBLIC_LAUNCH_PRD.md`, `M6_PUBLIC_LAUNCH_SPEC.md` as style references).
-- **Do not implement code** in this session — deliverables only.
+- **Production-grade** — match M6 PRD rigor.
+- **Do not implement code** in this session.
+- **Do NOT write the Engineering Spec** — that is a **separate session** after DOM approves Gate C1.
 
 ### Execute this pipeline (sequential, no skips)
 
@@ -53,13 +58,8 @@ Adversarial pre-mortem per INTENT-m7b §8.
 **Output:** `docs/DESIGN/M7_LINUX_PARITY_PRD.md`  
 Must honor locked constraints **L-C1 through L-C10** from INTENT-m7b.  
 Include: pillars, falsification paths, degradation rules, success metrics L-1–L-7, non-goals, gate matrix overview.  
-End with: **Gate C1 — awaiting DOM approval.**
-
-#### Step 4 — Engineering Spec
-
-**Output:** `docs/DESIGN/M7_LINUX_PARITY_SPEC.md`  
-Include: module contracts (`linux-window.ts`, capture branch, `linux-package.yml`), wave plan 7b–7f with STOP gates, grep-gates, CI policy (workflow_dispatch only for linux package), README claim table, human smoke scripts for X11 and Wayland floor.  
-End with: **Gate D1 — awaiting DOM approval.**
+**Altitude:** intent only — no file trees, no APIs, no library versions (those belong in Spec).  
+End with: **Gate C1 — STOP. Awaiting DOM approval. Do not write Spec.**
 
 ### Non-negotiables
 
@@ -76,17 +76,18 @@ Gate B7b: APPROVED (INTENT-m7b-linux-parity.md)
 STORM: docs/DESIGN/storm-reports/speakflow-linux-parity-2026-briefing.md
 WARGAME: docs/DESIGN/WARGAME-m7-linux-parity.md — score: _/10
 PRD: docs/DESIGN/M7_LINUX_PARITY_PRD.md — Gate C1 pending DOM
-SPEC: docs/DESIGN/M7_LINUX_PARITY_SPEC.md — Gate D1 pending DOM
-Recommended first build wave after D1: 7b (linux-package.yml + AppImage/deb)
+SPEC: NOT IN THIS SESSION — use FABLE5-LINUX-SPEC-PASTE-COMMAND.md after C1 approval
 Blockers for DOM: _
 ```
 
+End with a one-paragraph handoff: Gate C1 reached; next step is DOM approval, then **new session** for Spec.
+
 ---
 
-## After Fable 5 finishes
+## After Session 1 finishes
 
-1. DOM approves PRD (C1) — same session if possible  
-2. DOM approves Spec (D1)  
-3. **Start Linux build immediately** (Sonnet-tier, waves per Spec)
+1. DOM reviews and approves PRD (Gate C1)  
+2. **New session** — paste `FABLE5-LINUX-SPEC-PASTE-COMMAND.md` (not this file)  
+3. DOM approves Spec (Gate D1) → build waves per Spec
 
 Mac human tester does **not** block step 3.

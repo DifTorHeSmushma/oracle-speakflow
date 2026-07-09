@@ -3,7 +3,7 @@
 **Milestone:** M7b — "Linux Ships" (slice of M7)  
 **Date:** 2026-07-09  
 **Author:** Library Architect — Oracle-SpeakFlow  
-**Consumer:** Fable 5 (`claude-fable-5-thinking-high`) @ repo root → STORM → WARGAME → PRD (C1) → Spec (D1)  
+**Consumer:** Fable 5 (`claude-fable-5-thinking-high`) @ repo root → STORM → WARGAME → PRD (C1) **STOP** → Spec (D1) in **separate session**  
 **Status:** ✅ **Gate B7b APPROVED (2026-07-09)** — DOM: production-grade Linux cycle; macOS Wave 7a complete; no wait for Mac human tester.  
 **Altitude:** **Intent only** — problem, bet, falsification, outcomes, locked constraints, STORM commission. **No file trees, APIs, library picks, or implementation steps** — those belong in PRD/Spec after STORM+WARGAME.
 
@@ -27,16 +27,18 @@
 ```
 Gate B7b (this doc)     Architect / DOM           → INTENT Linux forensic
      ↓
-STORM                   Fable 5                   → docs/DESIGN/storm-reports/speakflow-linux-parity-2026-briefing.md
+STORM                   Fable 5 Session 1         → docs/DESIGN/storm-reports/speakflow-linux-parity-2026-briefing.md
      ↓
-WARGAME                 Fable 5                   → docs/DESIGN/WARGAME-m7-linux-parity.md (score ≥ 7/10)
+WARGAME                 Fable 5 Session 1         → docs/DESIGN/WARGAME-m7-linux-parity.md (score ≥ 7/10)
      ↓
-PRD                     Fable 5                   → docs/DESIGN/M7_LINUX_PARITY_PRD.md — Gate C1 (DOM)
+PRD                     Fable 5 Session 1         → docs/DESIGN/M7_LINUX_PARITY_PRD.md — Gate C1 (DOM) — STOP
      ↓
-SPEC                    Fable 5                   → docs/DESIGN/M7_LINUX_PARITY_SPEC.md — Gate D1 (DOM)
+SPEC                    Fable 5 Session 2         → docs/DESIGN/M7_LINUX_PARITY_SPEC.md — Gate D1 (DOM) — new session only
      ↓
 BUILD                   Sonnet-tier @ repo root    → waves 7b–7f per Spec; build starts same day as D1
 ```
+
+**Handoff discipline:** PRD and Spec are **never** in the same session (M6 parity). Session 1 ends at C1. Session 2 reads approved PRD cold.
 
 **Do not skip STORM or WARGAME.** Linux paste/focus is **harder than macOS** (X11 vs Wayland). A single-shot PRD will invent wrong answers.
 
@@ -201,6 +203,6 @@ We believe that if Oracle SpeakFlow implements a **`linux-window` foreground abs
 
 ## 11. Handoff to Fable 5
 
-Gate B7b reached. Next: run STORM → WARGAME → PRD → Spec per `docs/DESIGN/FABLE5-LINUX-PASTE-COMMAND.md`.
+Gate B7b reached. Next: **Session 1** — `docs/DESIGN/FABLE5-LINUX-PASTE-COMMAND.md` (STORM → WARGAME → PRD → STOP C1). **Session 2** — `FABLE5-LINUX-SPEC-PASTE-COMMAND.md` after C1 approval only.
 
 `_B7b approved by DOM: 2026-07-09 — Linux INTENT production-grade; proceed Fable 5 immediately_`

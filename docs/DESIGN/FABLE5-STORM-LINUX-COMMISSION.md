@@ -18,9 +18,9 @@ Deliverable: `docs/DESIGN/storm-reports/speakflow-linux-parity-2026-briefing.md`
 
 Then **WARGAME** (adversarial pre-mortem, score ≥ 7/10) → `docs/DESIGN/WARGAME-m7-linux-parity.md`
 
-Then **brownfield PRD** → `docs/DESIGN/M7_LINUX_PARITY_PRD.md` (Gate C1 — DOM approval)
+Then **brownfield PRD** → `docs/DESIGN/M7_LINUX_PARITY_PRD.md` (Gate C1 — DOM approval) — **Session 1 STOP**
 
-Then **engineering Spec** → `docs/DESIGN/M7_LINUX_PARITY_SPEC.md` (Gate D1)
+Then **engineering Spec** → `docs/DESIGN/M7_LINUX_PARITY_SPEC.md` (Gate D1) — **Session 2 only** (`FABLE5-LINUX-SPEC-PASTE-COMMAND.md`)
 
 ---
 
