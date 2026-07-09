@@ -1,0 +1,118 @@
+name: Mac Package
+
+# IMPORTANT: this workflow MUST NOT run on push/PR to branches (G24).
+# Only workflow_dispatch (manual) and version tags trigger this.
+# check:workflows (G24 gate) enforces this invariant automatically.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  mac-package:
+    name: Build macOS package (ad-hoc signed)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/electron
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Cache electron-builder
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/electron-builder
+          key: ${{ runner.os }}-electron-builder-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-builder-
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Assert all CI gates pass before packaging
+      - name: check:manifest (G14)
+        run: npm run check:manifest
+
+      - name: check:focus (G19)
+        run: npm run check:focus
+
+      - name: check:workflows (G24)
+        run: npm run check:workflows
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: UI component tests
+        run: npm run test:ui
+
+      - name: Build (tsc)
+        run: npm run build
+
+      - name: Build UI (vite)
+        run: npm run build:ui
+
+      - name: Create resources/bin (mac CI — no Windows binaries)
+        # resources/bin is gitignored; whisper-cli.exe and ggml models are Windows-only.
+        # electron-builder's extraResources requires the source dir to exist.
+        # The macOS build ships without bundled binaries — cloud transcription is the G23 smoke target.
+        run: mkdir -p resources/bin
+
+      - name: Package (electron-builder — dmg + zip, ad-hoc signed)
+        run: npm run package
+        env:
+          # Suppress code-signing identity search; identity: null already set in package.json build.mac
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Artifact hygiene check
+        run: |
+          echo "=== Checking for .env files in dist-installer ==="
+          if find dist-installer -name ".env" | grep -q .; then
+            echo "FAIL: .env file found in artifact tree"
+            exit 1
+          fi
+          echo "OK: no .env files"
+
+          echo "=== Checking for absolute CI runner paths in artifact ==="
+          if grep -rq "/Users/runner/" dist-installer/ 2>/dev/null; then
+            echo "FAIL: absolute /Users/runner/ path found in artifact (path leak)"
+            exit 1
+          fi
+          echo "OK: no absolute CI runner paths"
+
+          echo "Hygiene PASS"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-speakflow-mac-dmg
+          path: dist-installer/*.dmg
+          if-no-files-found: error
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-speakflow-mac-zip
+          path: dist-installer/*.zip
+          if-no-files-found: error

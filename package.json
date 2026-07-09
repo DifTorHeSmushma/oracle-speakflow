@@ -13,6 +13,7 @@
     "start:electron": "electron dist/electron-main.js",
     "check:manifest": "node scripts/check-manifest.mjs",
     "check:focus": "node scripts/check-focus-grep.mjs",
+    "check:workflows": "node scripts/check-workflows.mjs",
     "test": "vitest run --config vitest.config.ts",
     "test:ui": "vitest run --config vitest.ui.config.ts",
     "test:watch": "vitest",

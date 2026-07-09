@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # FREE runners only — macos is intentionally absent (G24 / mac-package.yml).
+        # check:workflows enforces this invariant automatically on every CI run.
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: check:manifest (G14)
+        run: npm run check:manifest
+
+      - name: check:focus (G19 — no SetForegroundWindow)
+        run: npm run check:focus
+
+      - name: check:workflows (G24 — no macos on push/PR)
+        run: npm run check:workflows
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: UI component tests
+        run: npm run test:ui
+
+      - name: Build (tsc)
+        run: npm run build
+
+      - name: Build UI (vite)
+        run: npm run build:ui
+
+      # npm run package is intentionally skipped on CI.
+      # electron-builder requires platform-native binaries (whisper-cli.exe,
+      # ggml-tiny.en.bin) under resources/bin/, which are gitignored and
+      # local-only. Mac packaging runs in mac-package.yml (dispatch/tags only).
