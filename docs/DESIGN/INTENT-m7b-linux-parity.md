@@ -82,7 +82,7 @@ We believe that if Oracle SpeakFlow implements a **`linux-window` foreground abs
 - **X11 paste reliability < 7/10** on Ubuntu 22.04/24.04 (Cursor chat + terminal) after M7b → do not claim "Linux supported"; document Windows+Mac only.
 - **Any paste into wrong window** or **focus-steal equivalent** on Linux → safety floor breached; block release (Invariant #18 spirit).
 - **Hands-free or mute kill-switch regresses** on Linux → block release (Invariant #19).
-- **Wayland auto-paste ships broken** → must degrade to **clipboard+toast only** with README honesty (Handy pattern).
+- **Wayland without verified auto-paste backend** → do not list as supported; do not ship clipboard-primary as the product (DOM C1).
 - **`linux-package.yml` cannot produce a launchable artifact** on `ubuntu-latest` → viability failure; do not publish Linux download link.
 
 ### De-risk focus
@@ -98,7 +98,7 @@ We believe that if Oracle SpeakFlow implements a **`linux-window` foreground abs
 |---|--------|--------|--------------|
 | L-1 | **Linux CI artifact** | `workflow_dispatch` produces AppImage **or** deb that launches | CI + G23-style bundle verify on runner |
 | L-2 | **X11 end-to-end dictation** | Hands-free or PTT → corrected text in focused app ≥ **8/10**; **0 wrong-target paste** | Human smoke Ubuntu X11 (VM or contributor) |
-| L-3 | **Wayland floor** | Clipboard+toast works; auto-paste only if STORM+WARGAME proves `wtype` path | README + smoke |
+| L-3 | **Auto-paste on supported sessions** | Hands-free auto-paste ≥8/10 on every README-listed config; 0 wrong-target; clipboard = guard fallback only | Human smoke + README |
 | L-4 | **Capture** | Mic works via FFmpeg pulse (or documented fallback) without manual user binary steps | CI + smoke |
 | L-5 | **Invariants preserved** | #17 single mic owner, #18 no foreground steal, #19 mute blocks paste | grep-gate + review |
 | L-6 | **Windows + macOS non-regression** | Existing gates green | `ci.yml` + `mac-package.yml` unchanged behavior |
@@ -112,13 +112,15 @@ We believe that if Oracle SpeakFlow implements a **`linux-window` foreground abs
 
 **One sentence:** On a **fresh Ubuntu 24.04 X11** session, user downloads the **CI-built AppImage/deb**, grants mic permission, focuses a **text field in Cursor or GNOME Terminal**, speaks hands-free or via PTT, and **corrected text appears in that field** via Ctrl+V or sanctioned clipboard fallback — **no manual `whisper-cli` step** (cloud Groq path acceptable for M7b thin slice; bundled local Linux binaries may follow Windows pattern in a later wave if Spec scopes it).
 
-**Wayland thin slice:** speak → transcript on clipboard + toast; **no broken auto-paste**.
+**Wayland:** included in supported matrix **only if** Spec proves verified auto-paste backend with human smoke; otherwise unsupported (not clipboard-primary).
+
+**DOM C1 (2026-07-09):** Hands-free **must** auto-paste on supported Linux — same bar as Windows. PTT is backup.
 
 **Explicitly NOT in thin slice (defer to Spec waves or M7c):**
 - Bundled local Whisper on Linux (optional follow-on; Windows has bundled; Mac cloud-first)
 - Flathub/snap publishing
 - GPU / Parakeet
-- Full compositor matrix (only Ubuntu X11 + Wayland floor required)
+- Full compositor matrix beyond Spec-defined supported sessions
 
 ---
 
@@ -132,7 +134,7 @@ We believe that if Oracle SpeakFlow implements a **`linux-window` foreground abs
 | L-C4 | **Mute hard-block** — `decidePaste` returns `block` when muted | Invariant #19 |
 | L-C5 | **Single mic owner** — FFmpeg pipe capture; no renderer `getUserMedia` | Invariant #17 |
 | L-C6 | **Linux package CI = `workflow_dispatch` + tags only** — mirror `mac-package.yml` / G24 discipline; **no** expensive runner loops on every push | C-10 pattern |
-| L-C7 | **X11-first ship** — Wayland gets clipboard floor unless WARGAME scores `wtype` path ≥ 7/10 with evidence | INTENT-m7 §2 |
+| L-C7 | **Auto-paste on supported sessions (DOM C1)** — hands-free and PTT must auto-paste on every Linux configuration we claim supported (Windows parity). Clipboard+toast is guard fallback only. Unsupported sessions are not listed in README. Spec proves minimum matrix (X11 required; Wayland only with evidence-backed backend). | DOM C1 |
 | L-C8 | **Cloud path minimum for M7b proof** — local Whisper bundling on Linux is **optional wave**, not a blocker for L-1 if README is honest | M6 parity |
 | L-C9 | **Repo may stay private** — artifacts distributed via Actions download → Drive link; no source exposure | DOM decision |
 | L-C10 | **No silent cloud on local failure** — if local mode added later, same L5 hard-block as Windows | M6 C-7 |
