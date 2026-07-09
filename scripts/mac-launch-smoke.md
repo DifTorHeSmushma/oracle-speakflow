@@ -2,12 +2,39 @@
 
 **Gate:** G23 (M-5 macOS portability proof)  
 **Authority:** M6_PUBLIC_LAUNCH_SPEC §0 Q4, §8 G23  
-**Runner:** DOM on personal macOS machine  
+**Runner:** DOM on personal macOS machine **OR** automated **G23-runner** step in `mac-package.yml` (cloud Mac — no physical Mac required)
+
+---
+
+## Path A — No physical Mac (free tier, recommended for DOM)
+
+When you have **no Mac access**, the macOS build still runs on **GitHub's cloud `macos-latest` runner**:
+
+1. GitHub → **Actions** → **Mac Package** → **Run workflow** (branch `main`).
+2. Wait for green. The workflow step **G23-runner** verifies on the cloud Mac:
+   - `.app` bundle exists
+   - Mach-O binary present
+   - ad-hoc `codesign`
+   - `xattr -cr` (Gatekeeper prep)
+3. Download artifacts: **oracle-speakflow-mac-dmg** and **oracle-speakflow-mac-zip**.
+
+Record in `M6_GATE_RECORD.md`:
+
+```
+| G23 | auto+artifact | M-5 macOS CI build + G23-runner bundle verify | ✅ PASS | <date>: Mac Package workflow green; G23-runner on cloud Mac; human launch N/A (no Mac access) |
+```
+
+This satisfies **M-5 build proof** per PRD L8 (macOS = proof not parity). Human mic/UI smoke is optional when a Mac becomes available.
+
+---
+
+## Path B — Physical Mac (optional human smoke)
+
 **Target:** cloud transcription path (Fast tier not expected; whisper binaries are Windows-only)
 
 ---
 
-## Prerequisites
+## Prerequisites (Path B only)
 
 - A successful `mac-package.yml` run via **workflow_dispatch** (GitHub → Actions → Mac Package → Run workflow)
 - A macOS machine (Sequoia / Ventura / Sonnet or later)

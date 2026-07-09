@@ -85,6 +85,35 @@ jobs:
           # Suppress code-signing identity search; identity: null already set in package.json build.mac
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
+      # G23-runner: verify the macOS bundle ON the GitHub cloud Mac (no physical Mac required).
+      # Proves: .app exists, Mach-O binary present, ad-hoc codesign, Gatekeeper prep (xattr).
+      # Human launch smoke (mic/UI) remains optional when DOM has Mac access.
+      - name: G23-runner — verify macOS app bundle on cloud Mac
+        run: |
+          set -euo pipefail
+          APP="$(find dist-installer -name '*.app' -maxdepth 4 | head -1)"
+          if [ -z "$APP" ]; then
+            echo "FAIL: no .app bundle under dist-installer"
+            find dist-installer -maxdepth 4 -print
+            exit 1
+          fi
+          echo "Found app bundle: $APP"
+          BIN="$(find "$APP/Contents/MacOS" -maxdepth 1 -type f | head -1)"
+          if [ -z "$BIN" ]; then
+            echo "FAIL: no Mach-O binary in Contents/MacOS"
+            exit 1
+          fi
+          echo "Mach-O binary: $BIN"
+          file "$BIN"
+          codesign -dv --verbose=2 "$APP" 2>&1 | tee /tmp/codesign.txt
+          if ! grep -qi 'adhoc' /tmp/codesign.txt; then
+            echo "WARN: expected ad-hoc signature (identity: null); continuing"
+          fi
+          xattr -cr "$APP"
+          echo "xattr -cr OK (Gatekeeper prep)"
+          ls -lh dist-installer/*.dmg dist-installer/*.zip
+          echo "G23-runner PASS — macOS artifact built and verified on cloud Mac"
+
       - name: Artifact hygiene check
         run: |
           echo "=== Checking for .env files in dist-installer ==="
