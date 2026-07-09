@@ -11,6 +11,7 @@
   import ApiKeyPanel from "./ApiKeyPanel.svelte";
   import HotkeyEditor from "./HotkeyEditor.svelte";
   import ModelDownloader from "./ModelDownloader.svelte";
+  import TierPicker from "./TierPicker.svelte";
   import VoiceSettings from "./VoiceSettings.svelte";
   import DictionaryPanel from "./DictionaryPanel.svelte";
   import type { VoiceMode } from "../../src/types/voice.js";
@@ -153,6 +154,7 @@
       <TabsContent value="engine">
         <div class="tab-body">
           <SettingsFields bind:model bind:language bind:verbose bind:transcriptionMode />
+          <TierPicker bind:selectedTier={modelTier} />
           {#if transcriptionMode === "local" && !modelPresent}
             <ModelDownloader onDone={() => { modelPresent = true; }} />
           {/if}

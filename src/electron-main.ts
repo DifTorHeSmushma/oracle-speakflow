@@ -13,7 +13,9 @@ import { appendTranscript, readHistory } from "./services/transcript-store.js";
 import { keyboard, Key } from "@nut-tree-fork/nut-js";
 import { isErr, isOk } from "./utils/result.js";
 import { DEFAULT_HOTKEY, formatHotkeyLabel, HOTKEY_CONFIG_VERSION } from "./utils/defaultHotkey.js";
-import { getForegroundInfo, nativeHandleEquals, type ForegroundInfo } from "./utils/win32-window.js";
+import { getForegroundInfo, nativeHandleEquals, getForegroundAndCheckWindow, type ForegroundInfo } from "./utils/win32-window.js";
+import { recordExternalSample, captureNow, type TrackedTarget } from "./services/foregroundTracker.js";
+import { decideYield } from "./services/yieldFocus.js";
 import { startContinuousCapture, type CaptureSession } from "./services/capture.js";
 import { createVad, type VadEvents } from "./services/vad.js";
 import { decidePaste, classifyTarget } from "./services/paste.js";
@@ -91,6 +93,18 @@ let pasteTargetInfo: ForegroundInfo = null;
 let activeEngineHandle: EngineHandle | null = null;
 
 // ---------------------------------------------------------------------------
+// Yield-focus state (Wave 3 — §4.1 / §4.4)
+// Snapshot of the prior external foreground, taken at speechStart/keydown.
+// Used by the yield-focus ladder at inject time when SpeakFlow has focus.
+// ---------------------------------------------------------------------------
+let utteranceCapture: TrackedTarget = null;
+
+// Yield-focus timing constants (Spec §0 Q3 / §4.4 — tunable for G18 smoke).
+const YIELD_STALE_MS = 2_000;
+const YIELD_SETTLE_MS = 120;
+const YIELD_MAX_WAIT_MS = 500;
+
+// ---------------------------------------------------------------------------
 // Pipeline status tracker — populated by runPipeline, queried via
 // debug:last-pipeline-status IPC (dev-only offline self-check, Hotfix-D).
 // ---------------------------------------------------------------------------
@@ -140,15 +154,19 @@ function maybeRelisten(): void {
 }
 
 // Capture the foreground HWND at record start (speechStart or PTT keydown).
+// Also feeds the foreground tracker for the Wave 3 yield-focus ladder (§4.1).
 // Spec §4.5 / Invariant #18: read-only, never SetForegroundWindow.
 function captureTargetHwnd(): void {
   pasteTargetHwnd = null;
   pasteTargetInfo = null;
   if (process.platform !== "win32" || !win) return;
   const fg = getForegroundInfo();
-  if (!fg) return;
   const ours = win.getNativeWindowHandle();
-  if (nativeHandleEquals(fg.hwnd, ours)) {
+  const isOwn = fg ? nativeHandleEquals(fg.hwnd, ours) : false;
+  // Wave 3: update tracker so decideYield has an external sample at keydown/speechStart.
+  recordExternalSample(fg, isOwn, Date.now());
+  if (!fg) return;
+  if (isOwn) {
     console.log("[REC] SpeakFlow had focus at capture — paste will fall back to clipboard");
     return;
   }
@@ -163,6 +181,15 @@ function captureTargetHwnd(): void {
 function startCallAppPoll(allowlist: string[]): void {
   stopCallAppPoll();
   callAppPollTimer = setInterval(() => {
+    // Wave 3 §4.1: piggyback foreground tracker on this 1s poll.
+    // Records external (non-SpeakFlow) foreground samples for decideYield at inject time.
+    if (win && process.platform === "win32") {
+      const fg = getForegroundInfo();
+      const ownHwnd = win.getNativeWindowHandle();
+      const isOwn = fg ? nativeHandleEquals(fg.hwnd, ownHwnd) : false;
+      recordExternalSample(fg, isOwn, Date.now());
+    }
+
     exec("tasklist /FO CSV /NH", { timeout: 2_000 }, (_err, stdout) => {
       if (!stdout) return;
       const procs: string[] = stdout.split("\n").flatMap((line) => {
@@ -209,6 +236,8 @@ async function startContinuousMode(): Promise<void> {
 
     const beginHandsFreeUtterance = (): void => {
       if (state !== "LISTENING") return; // Invariant #6
+      // Wave 3 §4.1: snapshot the prior external target at speechStart.
+      utteranceCapture = captureNow(Date.now());
       transition("RECORDING");
     };
 
@@ -387,35 +416,100 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
     captureTargetHwnd();
   }
 
-  // decidePaste — Invariant #18: read-only foreground, no SetForegroundWindow.
-  const fg = getForegroundInfo();
-  const ownHwnd = win?.getNativeWindowHandle() ?? Buffer.alloc(0);
-  const ownHwndEquals = fg ? nativeHandleEquals(fg.hwnd, ownHwnd) : false;
+  const ownHwndBuf = win?.getNativeWindowHandle() ?? Buffer.alloc(0);
   const muteState = getMuteState();
   const termVariant = isOk(liveConfig) ? (liveConfig.value.terminalVariantEnabled ?? false) : false;
 
-  const decision = decidePaste({
-    capturedHwnd: pasteTargetHwnd,
-    capturedForeground: pasteTargetInfo,
-    foreground: fg,
-    ownHwndEquals,
-    muted: muteState.muted,
-    terminalVariantEnabled: termVariant,
-    classifier: classifyTarget,
-  });
-  // Hands-free / PTT fallback: chat app foreground → paste even if HWND capture failed.
-  let finalDecision = decision;
-  if (
-    decision.action === "clipboardToast" &&
-    fg &&
-    !ownHwndEquals &&
-    classifyTarget(fg) === "chat"
-  ) {
-    finalDecision = { action: "ctrlV" };
-    console.log(`[INJECT] chat-foreground fallback → ctrlV (${fg.processName})`);
+  // ---------------------------------------------------------------------------
+  // Wave 3 — yield-focus ladder (Spec §4.4 / Invariant #18 / G19).
+  // When SpeakFlow is focused at inject time, yield to the prior external target
+  // then re-verify before keystroke. Text already in clipboard — fallback is
+  // clipboard+toast (no keystroke). No SetForegroundWindow anywhere.
+  // ---------------------------------------------------------------------------
+  let finalDecision: ReturnType<typeof decidePaste>;
+
+  if (process.platform === "win32") {
+    // Batch getForegroundInfo + IsWindow(utteranceCapture.hwnd) in one PS call.
+    const capturedHwnd = utteranceCapture?.info?.hwnd ?? null;
+    const { foreground: fg, isWindowAlive: priorAlive } = getForegroundAndCheckWindow(capturedHwnd);
+    const ownHwndEquals = fg ? nativeHandleEquals(fg.hwnd, ownHwndBuf) : false;
+
+    if (ownHwndEquals) {
+      // SpeakFlow has focus — run yield-focus decision.
+      const plan = decideYield({
+        ownHwndEquals,
+        captured: utteranceCapture,
+        nowMs: Date.now(),
+        priorHwndAlive: priorAlive,
+        staleMs: YIELD_STALE_MS,
+        settleMs: YIELD_SETTLE_MS,
+        maxWaitMs: YIELD_MAX_WAIT_MS,
+      });
+      console.log(`[INJECT/YIELD] plan=${plan.action}${plan.action === "clipboardToast" ? ` (${plan.reason})` : ""}${plan.action === "yieldThenVerify" ? ` expectHwnd=${plan.expectHwnd}` : ""}`);
+
+      if (plan.action === "clipboardToast") {
+        finalDecision = { action: "clipboardToast", reason: plan.reason };
+      } else if (plan.action === "yieldThenVerify") {
+        // Yield: hide SpeakFlow so OS re-activates prior z-order window. No SetForegroundWindow (#18).
+        win?.hide();
+        await new Promise((r) => setTimeout(r, plan.settleMs));
+        // Re-verify: strict HWND equality required (S5/S9).
+        const fg1 = getForegroundInfo();
+        if (!fg1 || fg1.hwnd !== plan.expectHwnd) {
+          console.log(`[INJECT/YIELD] re-verify FAIL fg1=${fg1?.hwnd ?? "null"} expected=${plan.expectHwnd} → clipboard+toast`);
+          finalDecision = { action: "clipboardToast", reason: "post-yield foreground mismatch" };
+        } else {
+          // Yield succeeded — decidePaste with post-yield foreground (ownHwndEquals: false).
+          finalDecision = decidePaste({
+            capturedHwnd: plan.expectHwnd,
+            capturedForeground: utteranceCapture?.info ?? null,
+            foreground: fg1,
+            ownHwndEquals: false,
+            muted: muteState.muted,
+            terminalVariantEnabled: termVariant,
+            classifier: classifyTarget,
+          });
+          console.log(`[INJECT/YIELD] re-verify OK → decidePaste=${finalDecision.action}`);
+        }
+      } else {
+        // noYield (ownHwndEquals=true should never produce noYield, but handle defensively)
+        finalDecision = { action: "clipboardToast", reason: "unexpected noYield when focused" };
+      }
+    } else {
+      // Normal path: SpeakFlow not focused — existing decidePaste logic.
+      const decision = decidePaste({
+        capturedHwnd: pasteTargetHwnd,
+        capturedForeground: pasteTargetInfo,
+        foreground: fg,
+        ownHwndEquals,
+        muted: muteState.muted,
+        terminalVariantEnabled: termVariant,
+        classifier: classifyTarget,
+      });
+      // Chat-app fallback: paste even if HWND drifted within the same chat process.
+      if (decision.action === "clipboardToast" && fg && !ownHwndEquals && classifyTarget(fg) === "chat") {
+        finalDecision = { action: "ctrlV" };
+        console.log(`[INJECT] chat-foreground fallback → ctrlV (${fg.processName})`);
+      } else {
+        finalDecision = decision;
+      }
+    }
+  } else {
+    // Non-Windows: best-effort paste without foreground introspection.
+    const fg = getForegroundInfo();
+    const ownHwndEquals = fg ? nativeHandleEquals(fg.hwnd, ownHwndBuf) : false;
+    finalDecision = decidePaste({
+      capturedHwnd: pasteTargetHwnd,
+      capturedForeground: pasteTargetInfo,
+      foreground: fg,
+      ownHwndEquals,
+      muted: muteState.muted,
+      terminalVariantEnabled: termVariant,
+      classifier: classifyTarget,
+    });
   }
 
-  console.log(`[INJECT] decidePaste → ${finalDecision.action}${finalDecision.action === "clipboardToast" || finalDecision.action === "block" ? ` (${(finalDecision as { reason: string }).reason})` : ""}`);
+  console.log(`[INJECT] finalDecision=${finalDecision.action}${finalDecision.action === "clipboardToast" || finalDecision.action === "block" ? ` (${(finalDecision as { reason: string }).reason})` : ""}`);
 
   // Execute keystroke based on decision (Invariant #18: never SetForegroundWindow).
   let keystrokeOk = false;
@@ -497,6 +591,8 @@ function registerHotkey(hotkey: HotkeyConfig): void {
 
     // Capture HWND at keydown (Spec §4.5 — focus is trustworthy at record start)
     captureTargetHwnd();
+    // Wave 3 §4.1: snapshot the prior external target at PTT keydown.
+    utteranceCapture = captureNow(Date.now());
 
     if (!captureSession) {
       // PTT: start capture now (lazy start; in hands-free capture is always running)

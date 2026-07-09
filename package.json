@@ -12,6 +12,7 @@
     "start:app": "npm run build && npm run build:ui && electron dist/electron-main.js",
     "start:electron": "electron dist/electron-main.js",
     "check:manifest": "node scripts/check-manifest.mjs",
+    "check:focus": "node scripts/check-focus-grep.mjs",
     "test": "vitest run --config vitest.config.ts",
     "test:ui": "vitest run --config vitest.ui.config.ts",
     "test:watch": "vitest",

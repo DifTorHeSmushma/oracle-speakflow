@@ -77,3 +77,62 @@ export function nativeHandleEquals(hwndDecimal: string, nativeBuffer: Buffer): b
     return false;
   }
 }
+
+// Batch check: returns { foreground, isWindowAlive } in one PS invocation.
+// Used by the yield-focus path (§4.4) to check priorHwndAlive without a
+// separate PS call. checkHwnd must be a decimal HWND string from getForegroundInfo.
+export function getForegroundAndCheckWindow(checkHwnd: string | null): {
+  foreground: ForegroundInfo;
+  isWindowAlive: boolean;
+} {
+  if (process.platform !== "win32") return { foreground: null, isWindowAlive: false };
+  let safeCheckHwnd: string = "0";
+  if (checkHwnd) {
+    try { safeCheckHwnd = BigInt(checkHwnd).toString(); } catch { /* invalid — keep "0" */ }
+  }
+  const script = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class SfWin32b {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+}
+"@
+try {
+  $hw = [SfWin32b]::GetForegroundWindow()
+  $targetPid = [uint32]0
+  [void][SfWin32b]::GetWindowThreadProcessId($hw, [ref]$targetPid)
+  $cn = New-Object System.Text.StringBuilder 256
+  [void][SfWin32b]::GetClassName($hw, $cn, 256)
+  $pn = try { $p = Get-Process -Id $targetPid -EA Stop; try { $p.MainModule.ModuleName } catch { $p.Name + '.exe' } } catch { '' }
+  $alive = [SfWin32b]::IsWindow([IntPtr]::new(${safeCheckHwnd}))
+  Write-Output "$($hw.ToString())|$($cn.ToString())|$pn|$alive"
+} catch {
+  Write-Output 'null|null|null|false'
+}
+`.trim();
+  try {
+    const result = spawnSync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+      { encoding: "utf8", timeout: 3_000 }
+    );
+    if (result.error || result.status !== 0) return { foreground: null, isWindowAlive: false };
+    const line = (result.stdout ?? "").trim();
+    if (!line || line.startsWith("null|")) return { foreground: null, isWindowAlive: false };
+    const parts = line.split("|");
+    if (parts.length < 4) return { foreground: null, isWindowAlive: false };
+    const [hwnd, className, processName, alive] = parts;
+    const fg: ForegroundInfo =
+      hwnd && className !== undefined && processName !== undefined
+        ? { hwnd, className, processName }
+        : null;
+    return { foreground: fg, isWindowAlive: alive?.toLowerCase() === "true" };
+  } catch {
+    return { foreground: null, isWindowAlive: false };
+  }
+}
