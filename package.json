@@ -68,6 +68,7 @@
     "asarUnpack": [
       "node_modules/clipboardy/fallbacks/**",
       "node_modules/@nut-tree-fork/libnut-win32/build/Release/**",
+      "node_modules/@nut-tree-fork/libnut-linux/build/Release/**",
       "node_modules/uiohook-napi/prebuilds/**",
       "node_modules/onnxruntime-node/bin/**"
     ],
@@ -91,6 +92,23 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "perMachine": false
+    },
+    "linux": {
+      "target": [
+        { "target": "deb", "arch": ["x64"] },
+        { "target": "AppImage", "arch": ["x64"] }
+      ],
+      "category": "Utility",
+      "maintainer": "Domenic Young <domenic.369@gmail.com>",
+      "executableName": "oracle-speakflow",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0", "libnotify4", "libnss3", "libxss1", "libxtst6",
+        "xdg-utils", "libatspi2.0-0", "libuuid1", "libsecret-1-0",
+        "ffmpeg", "x11-utils"
+      ]
     },
     "mac": {
       "identity": null,

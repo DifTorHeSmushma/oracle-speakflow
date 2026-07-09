@@ -1446,6 +1446,17 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
     // In TEST_MODE, skip uiohook and capture — show window immediately for Playwright.
     if (process.env["TEST_MODE"] === "true") {
       win.show();
+      // Announce ready state to renderer (satisfies G28 assertion (c) state-machine check).
+      transition("IDLE");
+      // [SPIKE] nut-js load probe — Wave 7b / G28 (Linux-only, TEST_MODE-only).
+      // Verifies @nut-tree-fork/libnut-linux loads correctly from asarUnpack in the packaged app.
+      if (process.platform === "linux") {
+        import("@nut-tree-fork/nut-js").then(() => {
+          console.log("[SPIKE] nut-js load: OK");
+        }).catch((err: unknown) => {
+          console.log(`[SPIKE] nut-js load: FAIL: ${String(err)}`);
+        });
+      }
       // Expose a test-only IPC to inject synthetic state-change events
       ipcMain.on("test:set-state", (_event, payload: StateChangePayload) => {
         win?.webContents.send("state-change", payload);

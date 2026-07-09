@@ -1,0 +1,190 @@
+name: Linux Package
+
+# IMPORTANT: this workflow MUST NOT run on push/PR to branches (G27 / LD13).
+# Only workflow_dispatch (manual) and version tags trigger this.
+# check:workflows (G27 gate) enforces this invariant automatically on every CI run.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  linux-package:
+    name: Build Linux package (deb primary + AppImage)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Cache Electron binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/electron
+          key: ${{ runner.os }}-electron-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-
+
+      - name: Cache electron-builder
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-builder-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-builder-
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Assert all CI gates pass before packaging (mirrors mac-package.yml gate order)
+      - name: check:manifest (G14)
+        run: npm run check:manifest
+
+      - name: check:focus (G19/G30)
+        run: npm run check:focus
+
+      - name: check:workflows (G24/G27)
+        run: npm run check:workflows
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: UI component tests
+        run: npm run test:ui
+
+      - name: Build (tsc)
+        run: npm run build
+
+      - name: Build UI (vite)
+        run: npm run build:ui
+
+      - name: Create resources/bin (Linux CI — no bundled whisper binaries this cycle)
+        # LD15: no Linux inference binaries shipped this cycle.
+        # electron-builder's extraResources requires the source dir to exist.
+        run: mkdir -p resources/bin
+
+      - name: Package (electron-builder — deb + AppImage)
+        # --publish never: prevents electron-builder v26 implicit publishing.
+        run: npx electron-builder --linux --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      # G28: headless launch-verify + nut-js [SPIKE] load probe (LD7 spike half 1).
+      # Proves: deb Depends resolve on stock Ubuntu 24.04; app launches; nut-js loads OK.
+      - name: G28 — install deb + verify launch + nut-js load
+        run: |
+          set -euo pipefail
+
+          # Step 1: prove Depends resolves on stock Ubuntu 24.04 with zero manual steps (LD9).
+          sudo apt-get update && sudo apt-get install -y ./dist-installer/*.deb
+
+          # Step 2: launch headlessly under a virtual X server.
+          export TEST_MODE=true
+          xvfb-run -a oracle-speakflow > /tmp/launch.log 2>&1 &
+          APP_PID=$!
+          sleep 10
+
+          echo "=== launch.log ==="
+          cat /tmp/launch.log || true
+          echo "=================="
+
+          # (a) main process alive at T+10 s
+          kill -0 "$APP_PID"
+          echo "PASS (a): process alive at T+10 s"
+
+          # (b) nut-js load probe: [SPIKE] nut-js load: OK (LD7 spike half 1)
+          grep -q "\[SPIKE\] nut-js load: OK" /tmp/launch.log
+          echo "PASS (b): nut-js load OK"
+
+          # (c) state machine / renderer reached
+          grep -qE "State transition|\[IPC\] sent state-change" /tmp/launch.log
+          echo "PASS (c): state machine reached"
+
+          # (d) no crash lines
+          ! grep -qE "FATAL|Uncaught" /tmp/launch.log
+          echo "PASS (d): no crash lines"
+
+          kill "$APP_PID" || true
+          echo "G28 PASS"
+
+      # AppImage best-effort check (non-blocking — Ubuntu 24.04 AppArmor userns caveat, LD8).
+      - name: G28 — AppImage best-effort check
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          APPIMAGE="$(find dist-installer -name '*.AppImage' | head -1)"
+          if [ -z "$APPIMAGE" ]; then
+            echo "WARN: no AppImage found — skipping AppImage check"
+            exit 0
+          fi
+          export TEST_MODE=true
+          xvfb-run -a "$APPIMAGE" --appimage-extract-and-run --no-sandbox > /tmp/appimage.log 2>&1 &
+          AI_PID=$!
+          sleep 10
+          if kill -0 "$AI_PID" 2>/dev/null; then
+            echo "PASS: AppImage alive at T+10 s"
+            kill "$AI_PID" || true
+          else
+            echo "WARN: AppImage exited before T+10 s (AppArmor sandbox caveat on 24.04 — expected, LD8)"
+            cat /tmp/appimage.log || true
+          fi
+
+      - name: Artifact hygiene check
+        run: |
+          set -euo pipefail
+          echo "=== Checking for .env files in dist-installer ==="
+          if find dist-installer -name ".env" | grep -q .; then
+            echo "FAIL: .env file found in artifact tree"
+            exit 1
+          fi
+          echo "OK: no .env files"
+
+          # Check only user-facing metadata files for CI runner path leaks (not the full unpack
+          # tree — native deps embed CI build paths in intermediates, same as mac-package.yml).
+          echo "=== Checking metadata for CI runner path leaks ==="
+          LEAK=""
+          while IFS= read -r f; do
+            if grep -q '/home/runner/' "$f" 2>/dev/null; then
+              LEAK="$f"
+              break
+            fi
+          done < <(find dist-installer -type f \( -name '*.desktop' -o -name '*.yml' \) 2>/dev/null)
+          if [ -n "$LEAK" ]; then
+            echo "FAIL: /home/runner/ path in $LEAK"
+            exit 1
+          fi
+          echo "OK: no runner paths in metadata"
+
+          echo "=== Artifact list ==="
+          ls -lh dist-installer/*.deb 2>/dev/null || true
+          ls -lh dist-installer/*.AppImage 2>/dev/null || true
+          echo "Hygiene PASS"
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-speakflow-linux-deb
+          path: dist-installer/*.deb
+          if-no-files-found: error
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-speakflow-linux-appimage
+          path: dist-installer/*.AppImage
+          if-no-files-found: warn

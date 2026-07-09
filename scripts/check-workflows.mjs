@@ -68,6 +68,14 @@ for (const file of files) {
     fail(`Cannot read ${file}: ${err.message}`);
   }
 
+  // G27 — generalized packaging-CI discipline (LD13 / S-L4):
+  // Every *-package.yml must be dispatch/tags-only — no pull_request, no branch push.
+  if (/-package\.ya?ml$/.test(file)) {
+    if (hasPullRequestTrigger(content) || hasBranchPushTrigger(content)) {
+      fail(`${file}: *-package.yml workflows must be workflow_dispatch/tags-only (LD13)`);
+    }
+  }
+
   const isBranchTriggered = hasPullRequestTrigger(content) || hasBranchPushTrigger(content);
   if (!isBranchTriggered) continue;
 
