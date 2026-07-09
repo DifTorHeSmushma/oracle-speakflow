@@ -18,16 +18,31 @@ export type TargetClassifier = (info: ForegroundInfo) => TargetClass;
 
 // Known terminal window classes (case-insensitive comparison below)
 const TERMINAL_CLASSES = new Set([
+  // Windows
   "consolewindowclass",
   "cascadia_hosting_window_class", // Windows Terminal
   "mintty",
   "virtualconsoleclass",
   "conemu",
   "conemubackgroundtaskbarlocalwindow",
+  // Linux — WM_CLASS class part (lowercased); §0 Q6
+  "gnome-terminal",
+  "gnome-terminal-server",
+  "org.gnome.terminal",
+  "konsole",
+  "xterm",
+  "uxterm",
+  "alacritty",
+  "kitty",
+  "org.wezfurlong.wezterm",
+  "tilix",
+  "xfce4-terminal",
+  "terminator",
 ]);
 
 // Known terminal process names (lowercase for comparison)
 const TERMINAL_PROCESSES = new Set([
+  // Windows
   "cmd.exe",
   "powershell.exe",
   "pwsh.exe",
@@ -39,10 +54,23 @@ const TERMINAL_PROCESSES = new Set([
   "conemu.exe",
   "hyper.exe",
   "terminus.exe",
+  // macOS
   "terminal.app",
   "iterm.app",
   "iterm2.app",
   "warp.app",
+  // Linux — /proc comm form (15-char truncation included); §0 Q6
+  "gnome-terminal-",   // comm truncation of gnome-terminal-server
+  "gnome-terminal-server",
+  "konsole",
+  "xterm",
+  "alacritty",
+  "kitty",
+  "wezterm",
+  "wezterm-gui",
+  "tilix",
+  "xfce4-terminal",
+  "terminator",
 ]);
 
 /**

@@ -205,4 +205,97 @@ describe("paste service — G10", () => {
   it("classifyTarget: unknown app → chat (permissive default for identified processes)", () => {
     expect(classifyTarget({ hwnd: "1", className: "SomeOtherClass", processName: "myapp.exe" })).toBe("chat");
   });
+
+  // ---------------------------------------------------------------------------
+  // Linux terminal table — className (WM_CLASS class part) and comm process names (G29 §0 Q6)
+  // ---------------------------------------------------------------------------
+
+  it("classifyTarget: gnome-terminal-server className → terminal", () => {
+    expect(classifyTarget({ hwnd: "linux:0x1", className: "gnome-terminal-server", processName: "gnome-terminal-" })).toBe("terminal");
+  });
+
+  it("classifyTarget: gnome-terminal className → terminal", () => {
+    expect(classifyTarget({ hwnd: "linux:0x1", className: "gnome-terminal", processName: "dbus-daemon" })).toBe("terminal");
+  });
+
+  it("classifyTarget: konsole className → terminal", () => {
+    expect(classifyTarget({ hwnd: "linux:0x2", className: "konsole", processName: "konsole" })).toBe("terminal");
+  });
+
+  it("classifyTarget: kitty processName → terminal", () => {
+    expect(classifyTarget({ hwnd: "linux:0x3", className: "", processName: "kitty" })).toBe("terminal");
+  });
+
+  it("classifyTarget: alacritty className → terminal", () => {
+    expect(classifyTarget({ hwnd: "linux:0x4", className: "alacritty", processName: "alacritty" })).toBe("terminal");
+  });
+
+  it("classifyTarget: org.wezfurlong.wezterm className → terminal", () => {
+    expect(classifyTarget({ hwnd: "linux:0x5", className: "org.wezfurlong.wezterm", processName: "wezterm-gui" })).toBe("terminal");
+  });
+
+  it("classifyTarget: cursor processName → chat (IDE on Linux)", () => {
+    expect(classifyTarget({ hwnd: "linux:0x6", className: "cursor", processName: "cursor" })).toBe("chat");
+  });
+
+  it("classifyTarget: code processName → chat (VS Code on Linux)", () => {
+    expect(classifyTarget({ hwnd: "linux:0x7", className: "code", processName: "code" })).toBe("chat");
+  });
+
+  it("classifyTarget: firefox processName → chat", () => {
+    expect(classifyTarget({ hwnd: "linux:0x8", className: "firefox", processName: "firefox" })).toBe("chat");
+  });
+
+  // ---------------------------------------------------------------------------
+  // decidePaste ladder with linux: pseudo-hwnds (G29 §4.1)
+  // ---------------------------------------------------------------------------
+
+  const LINUX_HWND = "linux:0x3c00007";
+
+  function linuxBase(overrides: Partial<Parameters<typeof decidePaste>[0]> = {}) {
+    return decidePaste({
+      capturedHwnd: LINUX_HWND,
+      foreground: { hwnd: LINUX_HWND, className: "cursor", processName: "cursor" },
+      ownHwndEquals: false,
+      muted: false,
+      terminalVariantEnabled: false,
+      classifier: chatClassifier,
+      ...overrides,
+    });
+  }
+
+  it("linux: muted → block (#19)", () => {
+    expect(linuxBase({ muted: true }).action).toBe("block");
+  });
+
+  it("linux: own-window → clipboardToast", () => {
+    expect(linuxBase({ ownHwndEquals: true }).action).toBe("clipboardToast");
+  });
+
+  it("linux: hwnd mismatch → clipboardToast", () => {
+    expect(linuxBase({
+      foreground: { hwnd: "linux:0x9999999", className: "kitty", processName: "kitty" },
+      capturedForeground: { hwnd: LINUX_HWND, className: "cursor", processName: "cursor" },
+    }).action).toBe("clipboardToast");
+  });
+
+  it("linux: capturedHwnd=null → clipboardToast", () => {
+    expect(linuxBase({ capturedHwnd: null }).action).toBe("clipboardToast");
+  });
+
+  it("linux: terminal className + terminalVariantEnabled → shiftInsert", () => {
+    expect(linuxBase({
+      foreground: { hwnd: LINUX_HWND, className: "gnome-terminal", processName: "gnome-terminal-" },
+      classifier: classifyTarget,
+      terminalVariantEnabled: true,
+    }).action).toBe("shiftInsert");
+  });
+
+  it("linux: chat target + hwnd match → ctrlV", () => {
+    expect(linuxBase({ classifier: chatClassifier }).action).toBe("ctrlV");
+  });
+
+  it("linux: unknown target → clipboardToast", () => {
+    expect(linuxBase({ classifier: unknownClassifier }).action).toBe("clipboardToast");
+  });
 });

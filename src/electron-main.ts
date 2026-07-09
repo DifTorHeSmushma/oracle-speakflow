@@ -13,7 +13,9 @@ import { appendTranscript, readHistory } from "./services/transcript-store.js";
 import { keyboard, Key } from "@nut-tree-fork/nut-js";
 import { isErr, isOk } from "./utils/result.js";
 import { DEFAULT_HOTKEY, formatHotkeyLabel, HOTKEY_CONFIG_VERSION } from "./utils/defaultHotkey.js";
-import { getForegroundInfo, nativeHandleEquals, getForegroundAndCheckWindow, isDarwinSpeakFlowApp, darwinForegroundMatches, type ForegroundInfo } from "./utils/win32-window.js";
+import { getForegroundInfo, nativeHandleEquals, getForegroundAndCheckWindow, isDarwinSpeakFlowApp, darwinForegroundMatches, isLinuxSpeakFlowWindow, linuxForegroundMatches, type ForegroundInfo } from "./utils/win32-window.js";
+import { getLinuxSession } from "./utils/linux-session.js";
+import { getLastLinuxReadMeta } from "./utils/linux-window.js";
 import { recordExternalSample, captureNow, type TrackedTarget } from "./services/foregroundTracker.js";
 import { decideYield } from "./services/yieldFocus.js";
 import { startContinuousCapture, type CaptureSession } from "./services/capture.js";
@@ -153,10 +155,24 @@ function maybeRelisten(): void {
   }
 }
 
+// True when this platform has a verified foreground path (xprop/PS/osascript + keystroke).
+// Wayland/unknown Linux falls through to the clipboard floor by construction (Lock A already
+// returns null foreground, so decidePaste → clipboardToast before this is ever called).
+function hasVerifiedForegroundPath(): boolean {
+  if (process.platform === "win32" || process.platform === "darwin") return true;
+  if (process.platform === "linux") return getLinuxSession() === "x11";
+  return false;
+}
+
 function isOwnWindowForeground(fg: ForegroundInfo | null, ownHwndBuf: Buffer): boolean {
   if (!fg) return false;
   if (process.platform === "win32") return nativeHandleEquals(fg.hwnd, ownHwndBuf);
   if (process.platform === "darwin") return isDarwinSpeakFlowApp(fg.processName);
+  if (process.platform === "linux") {
+    // pid/wmClass were cached by the getLinuxForegroundInfo() call that produced fg.
+    const { pid, wmClass } = getLastLinuxReadMeta();
+    return isLinuxSpeakFlowWindow(pid, wmClass, process.pid);
+  }
   return false;
 }
 
@@ -166,7 +182,7 @@ function isOwnWindowForeground(fg: ForegroundInfo | null, ownHwndBuf: Buffer): b
 function captureTargetHwnd(): void {
   pasteTargetHwnd = null;
   pasteTargetInfo = null;
-  if ((process.platform !== "win32" && process.platform !== "darwin") || !win) return;
+  if (!hasVerifiedForegroundPath() || !win) return;
   const fg = getForegroundInfo();
   const ours = win.getNativeWindowHandle();
   const isOwn = isOwnWindowForeground(fg, ours);
@@ -190,7 +206,7 @@ function startCallAppPoll(allowlist: string[]): void {
   callAppPollTimer = setInterval(() => {
     // Wave 3 §4.1: piggyback foreground tracker on this 1s poll.
     // Records external (non-SpeakFlow) foreground samples for decideYield at inject time.
-    if (win && (process.platform === "win32" || process.platform === "darwin")) {
+    if (win && hasVerifiedForegroundPath()) {
       const fg = getForegroundInfo();
       const ownHwnd = win.getNativeWindowHandle();
       const isOwn = isOwnWindowForeground(fg, ownHwnd);
@@ -436,8 +452,9 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   // clipboard+toast (no keystroke). No SetForegroundWindow anywhere.
   // ---------------------------------------------------------------------------
   let finalDecision: ReturnType<typeof decidePaste>;
+  let pasteTargetForeground: ForegroundInfo | null = null;
 
-  if (process.platform === "win32" || process.platform === "darwin") {
+  if (hasVerifiedForegroundPath()) {
     const capturedHwnd = utteranceCapture?.info?.hwnd ?? null;
     const { foreground: fg, isWindowAlive: priorAlive } = getForegroundAndCheckWindow(capturedHwnd);
     const ownHwndEquals = isOwnWindowForeground(fg, ownHwndBuf);
@@ -463,7 +480,9 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
         const verified =
           process.platform === "win32"
             ? Boolean(fg1 && fg1.hwnd === plan.expectHwnd)
-            : darwinForegroundMatches(fg1, plan.expectHwnd);
+            : process.platform === "darwin"
+            ? darwinForegroundMatches(fg1, plan.expectHwnd)
+            : linuxForegroundMatches(fg1, plan.expectHwnd);
         if (!verified) {
           console.log(`[INJECT/YIELD] re-verify FAIL fg1=${fg1?.hwnd ?? "null"} expected=${plan.expectHwnd} → clipboard+toast`);
           finalDecision = { action: "clipboardToast", reason: "post-yield foreground mismatch" };
@@ -477,6 +496,7 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
             terminalVariantEnabled: termVariant,
             classifier: classifyTarget,
           });
+          pasteTargetForeground = fg1;
           console.log(`[INJECT/YIELD] re-verify OK → decidePaste=${finalDecision.action}`);
         }
       } else {
@@ -498,6 +518,7 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
       } else {
         finalDecision = decision;
       }
+      pasteTargetForeground = fg;
     }
   } else {
     const fg = getForegroundInfo();
@@ -511,6 +532,13 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
       terminalVariantEnabled: termVariant,
       classifier: classifyTarget,
     });
+    pasteTargetForeground = fg;
+  }
+
+  // Lock B (Spec §0 Q2): session-gate keystroke on Linux. Wayland/unknown never reaches
+  // a keystroke — both locks (A: null foreground; B: here) must fail open to break this.
+  if (process.platform === "linux" && getLinuxSession() !== "x11") {
+    finalDecision = { action: "clipboardToast", reason: "non-X11 session — keystroke path locked" };
   }
 
   console.log(`[INJECT] finalDecision=${finalDecision.action}${finalDecision.action === "clipboardToast" || finalDecision.action === "block" ? ` (${(finalDecision as { reason: string }).reason})` : ""}`);
@@ -523,6 +551,18 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
         await keyboard.pressKey(Key.LeftSuper, Key.V);
         await keyboard.releaseKey(Key.LeftSuper, Key.V);
         console.log("[INJECT] Cmd+V OK");
+      } else if (process.platform === "linux") {
+        // VTE terminals (GNOME Terminal, Tilix, Xfce, Terminator) use Ctrl+Shift+V;
+        // also accepted by Konsole, Alacritty, Kitty, WezTerm. Plain Ctrl+V for everything else.
+        if (classifyTarget(pasteTargetForeground) === "terminal") {
+          await keyboard.pressKey(Key.LeftControl, Key.LeftShift, Key.V);
+          await keyboard.releaseKey(Key.LeftControl, Key.LeftShift, Key.V);
+          console.log("[INJECT] Ctrl+Shift+V OK (Linux terminal)");
+        } else {
+          await keyboard.pressKey(Key.LeftControl, Key.V);
+          await keyboard.releaseKey(Key.LeftControl, Key.V);
+          console.log("[INJECT] Ctrl+V OK");
+        }
       } else {
         await keyboard.pressKey(Key.LeftControl, Key.V);
         await keyboard.releaseKey(Key.LeftControl, Key.V);

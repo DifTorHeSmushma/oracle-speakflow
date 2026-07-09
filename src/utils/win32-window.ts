@@ -1,11 +1,13 @@
 // Read-only foreground introspection (Spec §4.2 / Invariant #18).
-// Windows: PowerShell + user32. macOS: AppleScript. Linux: M7.
+// Windows: PowerShell + user32. macOS: AppleScript. Linux: xprop (M7b Wave 7c).
 import { spawnSync } from "node:child_process";
 import type { ForegroundInfo } from "./foreground-types.js";
 import { getDarwinForegroundInfo, isDarwinPriorTargetAlive } from "./darwin-window.js";
+import { getLinuxForegroundInfo, isLinuxPriorTargetAlive } from "./linux-window.js";
 
 export type { ForegroundInfo } from "./foreground-types.js";
 export { isDarwinSpeakFlowApp, darwinForegroundMatches } from "./darwin-window.js";
+export { isLinuxSpeakFlowWindow, linuxForegroundMatches } from "./linux-window.js";
 
 // One-shot PS script: compiles Add-Type once per invocation, returns "|"-delimited result.
 const FOREGROUND_SCRIPT = `
@@ -67,6 +69,7 @@ function getWin32ForegroundInfo(): ForegroundInfo | null {
 export function getForegroundInfo(): ForegroundInfo | null {
   if (process.platform === "win32") return getWin32ForegroundInfo();
   if (process.platform === "darwin") return getDarwinForegroundInfo();
+  if (process.platform === "linux") return getLinuxForegroundInfo();
   return null;
 }
 
@@ -90,6 +93,12 @@ export function getForegroundAndCheckWindow(checkHwnd: string | null): {
   if (process.platform === "darwin") {
     const foreground = getDarwinForegroundInfo();
     const isWindowAlive = checkHwnd ? isDarwinPriorTargetAlive(checkHwnd) : false;
+    return { foreground, isWindowAlive };
+  }
+
+  if (process.platform === "linux") {
+    const foreground = getLinuxForegroundInfo();
+    const isWindowAlive = checkHwnd ? isLinuxPriorTargetAlive(checkHwnd) : false;
     return { foreground, isWindowAlive };
   }
 
