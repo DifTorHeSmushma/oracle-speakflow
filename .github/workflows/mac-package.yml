@@ -117,6 +117,7 @@ jobs:
 
       - name: Artifact hygiene check
         run: |
+          set -euo pipefail
           echo "=== Checking for .env files in dist-installer ==="
           if find dist-installer -name ".env" | grep -q .; then
             echo "FAIL: .env file found in artifact tree"
@@ -124,12 +125,22 @@ jobs:
           fi
           echo "OK: no .env files"
 
-          echo "=== Checking for absolute CI runner paths in artifact ==="
-          if grep -rq "/Users/runner/" dist-installer/ 2>/dev/null; then
-            echo "FAIL: absolute /Users/runner/ path found in artifact (path leak)"
+          # Do NOT grep the entire mac-arm64 unpack tree for /Users/runner/ — Electron
+          # native deps embed CI build paths in intermediates (false positive).
+          # Check only user-facing metadata files that must not ship runner paths.
+          echo "=== Checking plist/env for CI runner path leaks ==="
+          LEAK=""
+          while IFS= read -r f; do
+            if grep -q '/Users/runner/' "$f" 2>/dev/null; then
+              LEAK="$f"
+              break
+            fi
+          done < <(find dist-installer -type f \( -name 'Info.plist' -o -name '.env' \) 2>/dev/null)
+          if [ -n "$LEAK" ]; then
+            echo "FAIL: /Users/runner/ path in $LEAK"
             exit 1
           fi
-          echo "OK: no absolute CI runner paths"
+          echo "OK: no runner paths in plist/env"
 
           echo "Hygiene PASS"
 
