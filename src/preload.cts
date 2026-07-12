@@ -2,7 +2,7 @@
 // Using .cts (CommonJS TypeScript) guarantees Electron loads this with require(),
 // avoiding all ESM preload edge cases where contextBridge.exposeInMainWorld
 // silently fails to populate window.electronAPI in the renderer.
-import type { StateChangePayload, ConfigUpdatePayload, McpToolCallPayload, VoiceSettingsPayload, DictionaryPayload, ConfigSnapshotPayload, TierStatusPayload, DiskCheckPayload, ModelTier, LastPipelineStatusPayload } from "./types/ipc.js";
+import type { StateChangePayload, ConfigUpdatePayload, McpToolCallPayload, VoiceSettingsPayload, DictionaryPayload, ConfigSnapshotPayload, TierStatusPayload, DiskCheckPayload, ModelTier, LastPipelineStatusPayload, PlatformCapsPayload } from "./types/ipc.js";
 
 const { contextBridge, ipcRenderer } = require("electron") as typeof import("electron");
 
@@ -105,6 +105,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   exportDictionary: (): Promise<string> => {
     return ipcRenderer.invoke("export-dictionary");
+  },
+  // Wave 7e: platform-caps sent once after ready and on every (re)load (Spec §7)
+  onPlatformCaps: (callback: (payload: PlatformCapsPayload) => void) => {
+    ipcRenderer.on("platform-caps", (_event, payload: PlatformCapsPayload) => callback(payload));
+    return () => { ipcRenderer.removeAllListeners("platform-caps"); };
   },
   // Test-only: inject synthetic state events (only available in TEST_MODE)
   testSetState: (payload: StateChangePayload) => {

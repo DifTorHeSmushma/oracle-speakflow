@@ -1,4 +1,4 @@
-import type { StateChangePayload, ConfigUpdatePayload, McpToolCallPayload, HotkeyConfig, VoiceSettingsPayload, DictionaryPayload, ConfigSnapshotPayload, TierStatusPayload, DiskCheckPayload, ModelTier, LastPipelineStatusPayload } from "../src/types/ipc.js";
+import type { StateChangePayload, ConfigUpdatePayload, McpToolCallPayload, HotkeyConfig, VoiceSettingsPayload, DictionaryPayload, ConfigSnapshotPayload, TierStatusPayload, DiskCheckPayload, ModelTier, LastPipelineStatusPayload, PlatformCapsPayload } from "../src/types/ipc.js";
 
 declare global {
   interface Window {
@@ -34,6 +34,8 @@ declare global {
       saveDictionary: (dict: DictionaryPayload) => Promise<{ ok: boolean; error?: string }>;
       importDictionary: (json: string) => Promise<{ ok: boolean; dictionary?: DictionaryPayload; error?: string }>;
       exportDictionary: () => Promise<string>;
+      // Wave 7e: platform capabilities (session type, pttAvailable, autoPaste)
+      onPlatformCaps: (callback: (payload: PlatformCapsPayload) => void) => () => void;
       // Test-only (TEST_MODE)
       testSetState: (payload: StateChangePayload) => void;
       testQuit: () => void;

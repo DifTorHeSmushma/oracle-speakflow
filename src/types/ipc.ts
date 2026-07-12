@@ -86,3 +86,14 @@ export type LastPipelineStatusPayload = {
   lastErrorKind: string | null;
   clipboardWriteRan: boolean;
 };
+
+/** Platform capabilities — sent once after ready and on every renderer (re)load. */
+export type PlatformCapsPayload = {
+  platform: NodeJS.Platform;
+  /** Linux session type; null on non-Linux. */
+  session: "x11" | "wayland" | "unknown" | null;
+  /** True iff PTT hotkey hook is operational (x11 + uIOhook.start succeeded; always true off-Linux). */
+  pttAvailable: boolean;
+  /** True iff auto-paste via keystrokes is supported this session (win32 ∨ darwin ∨ linux-x11). */
+  autoPaste: boolean;
+};

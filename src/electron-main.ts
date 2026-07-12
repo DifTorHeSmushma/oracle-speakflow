@@ -24,7 +24,7 @@ import { decidePaste, classifyTarget } from "./services/paste.js";
 import { getMuteState, setUserMute, setCallAppMute, setMicBusy, isCallAppActive, onMuteChange } from "./services/mute.js";
 import { correct } from "./services/correction.js";
 import { loadDictionary, saveDictionary as persistDictionary, importDictionary, exportDictionary } from "./services/dictionary.js";
-import type { StateChangePayload, ConfigUpdatePayload, AppState, HotkeyConfig, McpToolCallPayload, VoiceSettingsPayload, DictionaryPayload, ModelTier, TierStatusPayload, DiskCheckPayload, ConfigSnapshotPayload, LastPipelineStatusPayload } from "./types/ipc.js";
+import type { StateChangePayload, ConfigUpdatePayload, AppState, HotkeyConfig, McpToolCallPayload, VoiceSettingsPayload, DictionaryPayload, ModelTier, TierStatusPayload, DiskCheckPayload, ConfigSnapshotPayload, LastPipelineStatusPayload, PlatformCapsPayload } from "./types/ipc.js";
 import { getBinaryPath, getBundledBinDir } from "./utils/binaryPath.js";
 import { downloadTier, checkDiskForTier } from "./services/modelDownloader.js";
 import { isTierAvailable, resolveTierModel, TIER_LADDER } from "./services/modelRegistry.js";
@@ -119,6 +119,10 @@ let lastPipelineStatus: LastPipelineStatusPayload = {
 let activeDownloadAbort: AbortController | null = null;
 let activeDownloadTier: ModelTier | null = null;
 let downloadPct = 0;
+
+// Guards uIOhook.stop() on shutdown — stop() on a never-started hook is undefined behavior.
+// Set to true only when uIOhook.start() succeeds inside startHotkeyHook().
+let hookStarted = false;
 
 // ---------------------------------------------------------------------------
 // State helpers
@@ -686,6 +690,40 @@ function registerHotkey(hotkey: HotkeyConfig): void {
       resetToIdle("Unexpected error");
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Hotkey hook lifecycle (Wave 7e — guarded start, Spec §0 Q8 / LD11)
+// ---------------------------------------------------------------------------
+
+/** Session-gated, try/catch-wrapped uIOhook start. Never throws — tray+capture survive. */
+function startHotkeyHook(): void {
+  if (process.platform === "linux" && getLinuxSession() !== "x11") {
+    console.error("[HOTKEY] non-X11 session — PTT unavailable, hands-free unaffected (LD11)");
+    return;
+  }
+  try {
+    registerHotkey(activeHotkey);
+    uIOhook.start();
+    hookStarted = true;
+  } catch (err) {
+    console.error(`[HOTKEY] uIOhook.start failed — PTT unavailable, continuing: ${String(err)}`);
+    // Never rethrow — tray + capture must survive (S-L10)
+  }
+}
+
+/** Send platform-caps to the renderer once it is ready (Wave 7e / Spec §7). */
+function sendPlatformCaps(): void {
+  if (!win) return;
+  const session = process.platform === "linux" ? getLinuxSession() : null;
+  const pttAvailable = process.platform !== "linux" || hookStarted;
+  const autoPaste =
+    process.platform === "win32" ||
+    process.platform === "darwin" ||
+    (process.platform === "linux" && session === "x11");
+  const payload: PlatformCapsPayload = { platform: process.platform, session, pttAvailable, autoPaste };
+  win.webContents.send("platform-caps", payload);
+  console.log(`[IPC] sent platform-caps: ${JSON.stringify(payload)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1464,6 +1502,10 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
         transition("LISTENING");
       }
     });
+    // Send platform-caps on every (re)load so the renderer always has current caps.
+    win.webContents.on("did-finish-load", () => {
+      sendPlatformCaps();
+    });
     tray = createTray(win);
     setupIpc();
 
@@ -1505,8 +1547,7 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
         app.quit();
       });
     } else {
-      registerHotkey(activeHotkey);
-      uIOhook.start();
+      startHotkeyHook();
       // Start continuous capture (hands-free armed from launch, or PTT-ready in ptt mode)
       if (isOk(liveConfig)) {
         startContinuousMode().catch((err: unknown) =>
@@ -1524,7 +1565,7 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
   // Graceful shutdown — CLAUDE.md invariant #8: await stop() before exit
   // ---------------------------------------------------------------------------
   app.on("before-quit", () => {
-    if (process.env["TEST_MODE"] !== "true") {
+    if (process.env["TEST_MODE"] !== "true" && hookStarted) {
       uIOhook.stop();
     }
     stopCallAppPoll();
@@ -1543,7 +1584,7 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
 
   // Also handle SIGINT in case app is run without Electron's built-in handling
   process.on("SIGINT", () => {
-    uIOhook.stop();
+    if (hookStarted) uIOhook.stop();
     stopCallAppPoll();
     vadEvents?.stop();
     if (activeEngineHandle) {

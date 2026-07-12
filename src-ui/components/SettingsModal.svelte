@@ -17,6 +17,7 @@
   import type { VoiceMode } from "../../src/types/voice.js";
   import type { ModelTier } from "../../src/types/ipc.js";
   import { DEFAULT_VAD_CONFIG, DEFAULT_CORRECTION_CONFIG } from "../../src/types/voice.js";
+  import { platformCapsStore } from "../stores/daemon.js";
 
   const dispatch = createEventDispatcher<{ close: void }>();
 
@@ -142,6 +143,9 @@
             bind:llmCorrectionEnabled
           />
           <HotkeyEditor />
+          {#if $platformCapsStore && !$platformCapsStore.pttAvailable}
+            <p class="ptt-unavail">Push-to-talk needs an X11 session — hands-free listening is active</p>
+          {/if}
         </div>
       </TabsContent>
 
@@ -286,5 +290,14 @@
     font-size: var(--sf-text-caption, 11px);
     color: var(--sf-success);
     margin-right: auto;
+  }
+
+  .ptt-unavail {
+    font-size: var(--sf-text-caption, 11px);
+    color: var(--sf-warn, #eab308);
+    background: #1c1500;
+    border: 1px solid #eab30840;
+    border-radius: var(--sf-radius-sm, 6px);
+    padding: 4px 8px;
   }
 </style>
