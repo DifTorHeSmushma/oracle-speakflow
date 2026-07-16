@@ -18,6 +18,9 @@
 
 ---
 
+## 0. Quality Alert: Windows 11 Regression
+**CRITICAL:** As of 2026-07-16, a significant quality regression has been reported on Windows 11 (missing start words, mid-sentence dropouts). This takes precedence over non-blocking Linux/macOS refinements. See `docs/DESIGN/WINDOWS_QUALITY_LOG.md` for symptoms and next steps.
+
 ## 0. Resolution of PRD §9 Open Questions
 
 ### Q1 — Exact quantization variants + measured default tier (PRD §9.1, L3/L11)

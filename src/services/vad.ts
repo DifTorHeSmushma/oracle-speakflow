@@ -1,10 +1,12 @@
 import * as ort from "onnxruntime-node";
+import { performance } from "node:perf_hooks";
 import { Ok, Err } from "../utils/result.js";
 import type { Result } from "../utils/result.js";
 import { getVerifiedModelPath } from "../utils/binaryPath.js";
 import type { VadConfig, VadError } from "../types/voice.js";
 import type { CaptureSession } from "./capture.js";
 import type { getMuteState as GetMuteState } from "./mute.js";
+import { isCaptureDiagEnabled, type CaptureSegmentDetailed } from "./captureDiag.js";
 
 // ---------------------------------------------------------------------------
 // Silero v5 state: Float32 [2, 1, 128] = 256 elements, threaded per frame
@@ -30,9 +32,18 @@ function resolveRmsSpeechThreshold(): number {
   return Number.isFinite(v) && v > 0 ? v : 0.018;
 }
 
+export type SpeechEndPayload = {
+  wav: Buffer;
+  detailed: CaptureSegmentDetailed;
+  vadQueueDepthMax: number;
+  vadProcessLagFrames: number;
+  ortRunMsLast: number | null;
+  speechStartCount: number;
+};
+
 export type VadEvents = {
   onSpeechStart(cb: () => void): void;
-  onSpeechEnd(cb: (wav: Buffer) => void): void;
+  onSpeechEnd(cb: (payload: SpeechEndPayload) => void): void;
   /** Subscribe to capture frames — call only after handlers are registered. */
   arm(): void;
   stop(): void;
@@ -50,7 +61,6 @@ export const createVad = async (
   capture: CaptureSession,
   getMuteState: () => ReturnType<typeof GetMuteState>
 ): Promise<Result<VadEvents, VadError>> => {
-  // A4: hard-block on missing or corrupted model
   const modelResult = getVerifiedModelPath("silero_vad.onnx");
   if (!modelResult.ok) {
     const err = modelResult.error;
@@ -69,53 +79,53 @@ export const createVad = async (
     });
   }
 
-  // Per-session state — reset on stop()
   let state = freshState();
 
-  // VAD state machine
   let inSpeech = false;
   let speechPositiveCount = 0;
   let speechNegativeCount = 0;
 
-  // Idle false-trigger counter (A6, Spec §3.3) — stderr only, no transcript text
   let totalSpeechStartCount = 0;
 
   const speechStartCbs: Array<() => void> = [];
-  const speechEndCbs: Array<(wav: Buffer) => void> = [];
+  const speechEndCbs: Array<(payload: SpeechEndPayload) => void> = [];
 
   let frameListenerActive = true;
   let frameArmed = false;
   let frameChain: Promise<void> = Promise.resolve();
+  let pendingFrames = 0;
+  let vadQueueDepthMax = 0;
+  let ortRunMsLast: number | null = null;
   let debugMaxProb = 0;
   let debugFrameCount = 0;
   const rmsSpeechThreshold = resolveRmsSpeechThreshold();
+  const diag = isCaptureDiagEnabled();
 
-  const processFrame = async (frame: Float32Array): Promise<void> => {
+  const processFrame = async (frame: Float32Array, enqueueTotalFrames: number): Promise<void> => {
     if (!frameListenerActive) return;
 
-    const vadDebug = process.env["SPEAKFLOW_VAD_DEBUG"] === "1";
+    const vadDebug = process.env["SPEAKFLOW_VAD_DEBUG"] === "1" || diag;
     if (getMuteState().muted) {
       if (vadDebug && debugFrameCount % 100 === 0) {
         process.stderr.write(`[vad] debug skipped — muted (${getMuteState().reason ?? "unknown"})\n`);
       }
-      return; // Invariant #19 — hard gate
+      return;
     }
 
-    // S1 confirmed tensor schema exactly:
-    // input: Float32 [1, 512]   state: Float32 [2, 1, 128]   sr: Int64 [1]
     const inputTensor = new ort.Tensor("float32", Float32Array.from(frame), [1, FRAME_SAMPLES]);
     const stateTensor = new ort.Tensor("float32", Float32Array.from(state), [2, 1, 128]);
     const srTensor = new ort.Tensor("int64", BigInt64Array.from([16000n]), [1]);
 
     let outputs: Awaited<ReturnType<InferenceSession["run"]>>;
     try {
+      const t0 = performance.now();
       outputs = await session.run({ input: inputTensor, state: stateTensor, sr: srTensor });
+      ortRunMsLast = performance.now() - t0;
     } catch (err) {
       process.stderr.write(`[vad] inference error: ${String(err)}\n`);
       return;
     }
 
-    // Thread stateN → state for the next frame
     const newStateData = outputs["stateN"]?.data;
     if (newStateData instanceof Float32Array) {
       state = Float32Array.from(newStateData);
@@ -124,7 +134,6 @@ export const createVad = async (
     const prob = (outputs["output"]?.data as Float32Array | undefined)?.[0] ?? 0;
     const rms = frameRms(frame);
 
-    // Hybrid gate: Silero OR energy (quiet laptop mics often stay below Silero threshold).
     const isSpeechFrame =
       prob >= cfg.positiveSpeechThreshold ||
       (rms >= rmsSpeechThreshold && prob >= 0.015) ||
@@ -136,7 +145,7 @@ export const createVad = async (
       if (prob > debugMaxProb) debugMaxProb = prob;
       if (debugFrameCount % 100 === 0) {
         process.stderr.write(
-          `[vad] debug maxProb=${debugMaxProb.toFixed(3)} rms=${rms.toFixed(4)} thr=${rmsSpeechThreshold}\n`
+          `[vad] debug maxProb=${debugMaxProb.toFixed(3)} rms=${rms.toFixed(4)} thr=${rmsSpeechThreshold} qMax=${vadQueueDepthMax}\n`
         );
         debugMaxProb = 0;
       }
@@ -156,10 +165,12 @@ export const createVad = async (
       if (!inSpeech) capture.clearSoftOnset();
     }
 
+    const health = capture.getHealth();
+    const lagFrames = Math.max(0, health.totalFrames - enqueueTotalFrames);
+
     if (!inSpeech) {
       if (speechPositiveCount >= cfg.minSpeechFrames) {
         inSpeech = true;
-        // Backdate to the true onset: the whole positive run so far, not just minSpeechFrames.
         const backdate = speechPositiveCount;
         speechPositiveCount = 0;
         speechNegativeCount = 0;
@@ -167,7 +178,7 @@ export const createVad = async (
         capture.markSpeechStart(backdate);
         for (const cb of speechStartCbs) cb();
         process.stderr.write(
-          `[vad] speechStart #${totalSpeechStartCount} (prob=${prob.toFixed(3)} rms=${rms.toFixed(4)} backdate=${backdate})\n`
+          `[vad] speechStart #${totalSpeechStartCount} (prob=${prob.toFixed(3)} rms=${rms.toFixed(4)} backdate=${backdate} lag=${lagFrames} qMax=${vadQueueDepthMax})\n`
         );
       }
     } else {
@@ -175,21 +186,39 @@ export const createVad = async (
         inSpeech = false;
         speechPositiveCount = 0;
         speechNegativeCount = 0;
-        const wav = capture.takeSegment(cfg.preSpeechPadFrames);
-        process.stderr.write(`[vad] speechEnd — segment ${wav.length} bytes\n`);
-        for (const cb of speechEndCbs) cb(wav);
+        const detailed = capture.takeSegmentDetailed(cfg.preSpeechPadFrames);
+        const wav = detailed.gainedWav;
+        const payload: SpeechEndPayload = {
+          wav,
+          detailed,
+          vadQueueDepthMax,
+          vadProcessLagFrames: lagFrames,
+          ortRunMsLast,
+          speechStartCount: totalSpeechStartCount,
+        };
+        process.stderr.write(
+          `[vad] speechEnd — segment ${wav.length} bytes lag=${lagFrames} truncated=${detailed.meta.truncated}\n`
+        );
+        for (const cb of speechEndCbs) cb(payload);
+        vadQueueDepthMax = 0;
       }
     }
   };
 
   const onCaptureFrame = (frame: Float32Array): void => {
     if (!frameArmed || !frameListenerActive) return;
+    const enqueueTotalFrames = capture.getHealth().totalFrames;
+    pendingFrames++;
+    if (pendingFrames > vadQueueDepthMax) vadQueueDepthMax = pendingFrames;
     frameChain = frameChain
       .then(async () => {
-        await processFrame(frame);
+        await processFrame(frame, enqueueTotalFrames);
       })
       .catch((err: unknown) => {
         process.stderr.write(`[vad] processFrame error: ${String(err)}\n`);
+      })
+      .finally(() => {
+        pendingFrames = Math.max(0, pendingFrames - 1);
       });
   };
 
@@ -211,12 +240,12 @@ export const createVad = async (
       inSpeech = false;
       speechPositiveCount = 0;
       speechNegativeCount = 0;
-      state = freshState(); // reset Silero LSTM state
+      pendingFrames = 0;
+      state = freshState();
     },
   };
 
   return Ok(events);
 };
 
-// Frame constants re-exported for tests
 export const FRAME_SAMPLES = 512;

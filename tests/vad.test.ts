@@ -44,17 +44,56 @@ const DEFAULT_CFG: VadConfig = {
 
 function makeCaptureMock() {
   let _frameCb: ((f: Float32Array) => void) | null = null;
+  let totalFrames = 0;
+  const fakeWav = Buffer.from("RIFF....fake-wav");
 
   const session: CaptureSession = {
     onFrame: vi.fn((cb: (f: Float32Array) => void) => { _frameCb = cb; }),
     markSpeechStart: vi.fn(),
     markSoftOnset: vi.fn(),
     clearSoftOnset: vi.fn(),
-    takeSegment: vi.fn().mockReturnValue(Buffer.from("RIFF....fake-wav")),
+    takeSegment: vi.fn().mockReturnValue(fakeWav),
+    takeSegmentDetailed: vi.fn().mockReturnValue({
+      gainedWav: fakeWav,
+      rawWav: fakeWav,
+      rawPcm: Buffer.alloc(0),
+      gainedPcm: Buffer.alloc(0),
+      meta: {
+        speechStartFrame: 0,
+        speechEndFrame: 1,
+        speechFrameCount: 1,
+        padFrames: 1,
+        takeCount: 1,
+        ringCount: 1,
+        ringCapacity: 300,
+        truncated: false,
+        softOnsetFrame: null,
+        backdateFramesUsed: 0,
+        micGain: 20,
+        totalFrames: 1,
+        rawPeak: 0,
+        rawClipSamples: 0,
+        gainedPeak: 0,
+        gainedClipSamples: 0,
+        gainedClipFrac: 0,
+        sampleRate: 16000,
+      },
+    }),
+    getHealth: vi.fn(() => ({
+      deviceId: "audio=test",
+      micGain: 20,
+      ffmpegSpawnMs: 0,
+      firstPcmMs: 1,
+      ttfbMs: 1,
+      ffmpegRterrCount: 0,
+      totalFrames,
+      bytesPerSecWindow: 32000,
+    })),
     stop: vi.fn().mockResolvedValue(undefined),
   };
 
   const pushFrame = (frame: Float32Array = new Float32Array(FRAME_SAMPLES)) => {
+    totalFrames++;
     _frameCb?.(frame);
   };
 
@@ -231,7 +270,7 @@ describe("vad service", () => {
     if (!result.ok) return;
 
     const wavBuffers: Buffer[] = [];
-    result.value.onSpeechEnd((wav) => wavBuffers.push(wav));
+    result.value.onSpeechEnd((payload) => wavBuffers.push(payload.wav));
     armVad(result.value);
 
     for (let i = 0; i < DEFAULT_CFG.minSpeechFrames + DEFAULT_CFG.redemptionFrames; i++) pushFrame();

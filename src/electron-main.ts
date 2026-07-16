@@ -19,7 +19,7 @@ import { getLastLinuxReadMeta } from "./utils/linux-window.js";
 import { recordExternalSample, captureNow, type TrackedTarget } from "./services/foregroundTracker.js";
 import { decideYield } from "./services/yieldFocus.js";
 import { startContinuousCapture, type CaptureSession } from "./services/capture.js";
-import { createVad, type VadEvents } from "./services/vad.js";
+import { createVad, type VadEvents, type SpeechEndPayload } from "./services/vad.js";
 import { decidePaste, classifyTarget } from "./services/paste.js";
 import { getMuteState, setUserMute, setCallAppMute, setMicBusy, isCallAppActive, onMuteChange } from "./services/mute.js";
 import { correct } from "./services/correction.js";
@@ -29,6 +29,16 @@ import { getBinaryPath, getBundledBinDir } from "./utils/binaryPath.js";
 import { downloadTier, checkDiskForTier } from "./services/modelDownloader.js";
 import { isTierAvailable, resolveTierModel, TIER_LADDER } from "./services/modelRegistry.js";
 import { startEngine, stopEngine, armIdleUnload, type EngineHandle } from "./services/localEngine.js";
+import {
+  isCaptureDiagEnabled,
+  writeUtteranceArtifacts,
+  newUtteranceId,
+  hashTranscriptForDiag,
+  looksLikeBlankAudioMarker,
+  sha256Hex,
+  type CaptureSegmentDetailed,
+  type UtteranceDiagEvent,
+} from "./services/captureDiag.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -123,6 +133,85 @@ let downloadPct = 0;
 // Guards uIOhook.stop() on shutdown — stop() on a never-started hook is undefined behavior.
 // Set to true only when uIOhook.start() succeeds inside startHotkeyHook().
 let hookStarted = false;
+
+// Phase 0 capture diagnostics (SPEAKFLOW_CAPTURE_DIAG=1) — evidence only, no transcript text.
+type PendingCaptureDiag = {
+  utteranceId: string;
+  voiceMode: "handsFree" | "ptt";
+  detailed: CaptureSegmentDetailed;
+  vadQueueDepthMax: number | null;
+  vadProcessLagFrames: number | null;
+  ortRunMs: number | null;
+  appStateAtSpeechEnd: string;
+  health: ReturnType<CaptureSession["getHealth"]>;
+};
+let pendingCaptureDiag: PendingCaptureDiag | null = null;
+
+function flushCaptureDiag(opts: {
+  accepted: boolean;
+  discardReason: string | null;
+  text?: string;
+}): void {
+  if (!isCaptureDiagEnabled() || !pendingCaptureDiag) return;
+  const p = pendingCaptureDiag;
+  pendingCaptureDiag = null;
+  const text = opts.text ?? "";
+  const event: UtteranceDiagEvent = {
+    utteranceId: p.utteranceId,
+    ts: new Date().toISOString(),
+    voiceMode: p.voiceMode,
+    platform: process.platform,
+    deviceId: p.health.deviceId,
+    micGain: p.detailed.meta.micGain,
+    sampleRate: p.detailed.meta.sampleRate,
+    ttfbMs: p.health.ttfbMs,
+    ffmpegSpawnMs: p.health.ffmpegSpawnMs,
+    firstPcmMs: p.health.firstPcmMs,
+    ffmpegRterrCount: p.health.ffmpegRterrCount,
+    bytesPerSecWindow: p.health.bytesPerSecWindow,
+    vadQueueDepthMax: p.vadQueueDepthMax,
+    vadProcessLagFrames: p.vadProcessLagFrames,
+    ortRunMs: p.ortRunMs,
+    speechStartFrame: p.detailed.meta.speechStartFrame,
+    softOnsetFrame: p.detailed.meta.softOnsetFrame,
+    speechEndFrame: p.detailed.meta.speechEndFrame,
+    padFrames: p.detailed.meta.padFrames,
+    takeCount: p.detailed.meta.takeCount,
+    ringCountAtTake: p.detailed.meta.ringCount,
+    truncated: p.detailed.meta.truncated,
+    rawPeak: p.detailed.meta.rawPeak,
+    rawClipSamples: p.detailed.meta.rawClipSamples,
+    gainedPeak: p.detailed.meta.gainedPeak,
+    gainedClipSamples: p.detailed.meta.gainedClipSamples,
+    gainedClipFrac: p.detailed.meta.gainedClipFrac,
+    segmentSha256Raw: sha256Hex(p.detailed.rawPcm),
+    segmentSha256Gained: sha256Hex(p.detailed.gainedPcm),
+    rawWavPath: null,
+    gainedWavPath: null,
+    accepted: opts.accepted,
+    discardReason: opts.discardReason,
+    appStateAtSpeechEnd: p.appStateAtSpeechEnd,
+    blankAudioFlag: text ? looksLikeBlankAudioMarker(text) : false,
+    transcriptionMode: isOk(liveConfig) ? liveConfig.value.transcriptionMode : null,
+    modelTier: isOk(liveConfig) ? liveConfig.value.modelTier : null,
+    asrTextHash: text ? hashTranscriptForDiag(text) : null,
+  };
+  try {
+    const paths = writeUtteranceArtifacts(
+      configDir,
+      p.utteranceId,
+      p.detailed.rawWav,
+      p.detailed.gainedWav,
+      event
+    );
+    console.log(
+      `[CAPTURE_DIAG] wrote ${paths.rawWavPath} clipFrac=${p.detailed.meta.gainedClipFrac.toFixed(4)} ` +
+        `truncated=${p.detailed.meta.truncated} accepted=${opts.accepted}`
+    );
+  } catch (err) {
+    console.error(`[CAPTURE_DIAG] write failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // State helpers
@@ -270,17 +359,40 @@ async function startContinuousMode(): Promise<void> {
       transition("RECORDING");
     };
 
-    const finishHandsFreeUtterance = (wav: Buffer): void => {
+    const finishHandsFreeUtterance = (payload: SpeechEndPayload): void => {
+      const { wav, detailed } = payload;
       if (wav.length <= 44) return; // empty WAV header only
+
+      if (isCaptureDiagEnabled() && captureSession) {
+        pendingCaptureDiag = {
+          utteranceId: newUtteranceId(),
+          voiceMode: "handsFree",
+          detailed,
+          vadQueueDepthMax: payload.vadQueueDepthMax,
+          vadProcessLagFrames: payload.vadProcessLagFrames,
+          ortRunMs: payload.ortRunMsLast,
+          appStateAtSpeechEnd: state,
+          health: captureSession.getHealth(),
+        };
+      }
+
       if (state === "LISTENING") {
         beginHandsFreeUtterance();
       }
-      if (state !== "RECORDING") return;
+      if (state !== "RECORDING") {
+        // E2: segment taken while pipeline still busy — count as discard (Phase 0).
+        flushCaptureDiag({
+          accepted: false,
+          discardReason: `speechEnd_discarded_wrong_state:${state}`,
+        });
+        return;
+      }
       // Capture target at utterance end (closer to inject than speechStart — hands-free latency fix).
       captureTargetHwnd();
       const t0 = performance.now();
       runPipeline(wav, "handsFree", t0).catch((err: unknown) => {
         console.error("[HF] unhandled pipeline error:", err);
+        flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
         resetToIdle("Unexpected error");
         maybeRelisten();
       });
@@ -394,6 +506,11 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
         errMsg = "Transcription failed";
       }
     }
+    flushCaptureDiag({
+      accepted: true,
+      discardReason: null,
+      text: errMsg || "(empty)",
+    });
     // Hotfix-C: hands-free mode must NOT call resetToIdle() followed by maybeRelisten().
     // resetToIdle() emits IDLE+error; maybeRelisten() immediately emits bare LISTENING,
     // overwriting the error payload before the renderer can display it. Instead, emit a
@@ -426,6 +543,7 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`ERROR: Clipboard write failed — ${message}`);
+    flushCaptureDiag({ accepted: true, discardReason: "clipboard_write_failed", text });
     // Clipboard failure: surface transcript for manual copy.
     if (voiceMode === "handsFree") {
       transition("LISTENING", { transcript: text, error: "Clipboard write failed — copy manually" });
@@ -597,6 +715,8 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   // Persist to shared MCP history.
   appendTranscript(configDir, { text, timestamp: new Date().toISOString(), mode: transcriptionMode });
 
+  flushCaptureDiag({ accepted: true, discardReason: null, text });
+
   // Terminal state: loop to LISTENING (hands-free) or reset to IDLE (PTT).
   if (voiceMode === "handsFree") {
     transition("LISTENING", { transcript: text });
@@ -675,9 +795,23 @@ function registerHotkey(hotkey: HotkeyConfig): void {
       return;
     }
 
-    const wav = captureSession.takeSegment(0);
+    const detailed = captureSession.takeSegmentDetailed(0);
+    const wav = detailed.gainedWav;
+    const health = captureSession.getHealth();
     const hf = isOk(liveConfig) && liveConfig.value.voiceMode === "handsFree";
     const pipelineMode = hf ? "handsFree" : "ptt";
+    if (isCaptureDiagEnabled()) {
+      pendingCaptureDiag = {
+        utteranceId: newUtteranceId(),
+        voiceMode: pipelineMode,
+        detailed,
+        vadQueueDepthMax: null,
+        vadProcessLagFrames: null,
+        ortRunMs: null,
+        appStateAtSpeechEnd: state,
+        health,
+      };
+    }
     if (!hf) {
       // PTT-only: stop capture (release mic) after taking the segment
       void captureSession.stop().catch(() => {});
@@ -687,6 +821,7 @@ function registerHotkey(hotkey: HotkeyConfig): void {
     const t0 = performance.now();
     runPipeline(wav, pipelineMode, t0).catch((err: unknown) => {
       console.error("FATAL: Unhandled exception escaped pipeline —", err);
+      flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
       resetToIdle("Unexpected error");
     });
   });
@@ -1472,6 +1607,11 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
     // Resolve config directory to the persistent userData path so settings
     // survive reinstalls.  Must be called after app is ready.
     configDir = app.getPath("userData");
+    if (isCaptureDiagEnabled()) {
+      console.log(`[CAPTURE_DIAG] ENABLED — artifacts → ${join(configDir, "capture-diag")}`);
+    } else {
+      console.log(`[CAPTURE_DIAG] off (set SPEAKFLOW_CAPTURE_DIAG=1 to enable)`);
+    }
 
     // Load initial config — userData .env must override project-root .env (dev pollution fix)
     liveConfig = loadConfig(configDir, { envOverride: true });

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { Writable } from "node:stream";
+import { performance } from "node:perf_hooks";
 import { Ok, Err } from "../utils/result.js";
 import type { Result } from "../utils/result.js";
 import { getBinaryPath } from "../utils/binaryPath.js";
@@ -9,12 +10,18 @@ import { resolveDshowAudioInput } from "../utils/dshow-audio.js";
 import { resolveAvfAudioInput } from "../utils/avfoundation-audio.js";
 import { resolvePulseAudioInput } from "../utils/pulse-audio.js";
 import type { RecorderError } from "./recorder.js";
+import {
+  FRAME_BYTES,
+  FRAME_SAMPLES,
+  RING_BUFFER_FRAMES,
+  SAMPLE_RATE,
+  countClipSamplesS16le,
+  isCaptureDiagEnabled,
+  type CaptureSegmentDetailed,
+  type CaptureSegmentMeta,
+} from "./captureDiag.js";
 
-// 512 samples × 2 bytes/sample (s16le) = 1024 bytes per frame
-const FRAME_SAMPLES = 512;
-const FRAME_BYTES = FRAME_SAMPLES * 2;
-const SAMPLE_RATE = 16_000;
-const RING_BUFFER_FRAMES = 300; // ~9.6 s at 32 ms/frame
+export { FRAME_SAMPLES, RING_BUFFER_FRAMES, SAMPLE_RATE } from "./captureDiag.js";
 
 export function buildFfmpegContinuousArgs(audioInput: string): string[] {
   const inputFormat =
@@ -33,6 +40,18 @@ export function buildFfmpegContinuousArgs(audioInput: string): string[] {
 
 export type PcmFrame = Float32Array; // exactly 512 samples, normalised to [-1, 1]
 
+export type CaptureHealth = {
+  deviceId: string;
+  micGain: number;
+  ffmpegSpawnMs: number;
+  firstPcmMs: number | null;
+  ttfbMs: number | null;
+  ffmpegRterrCount: number;
+  totalFrames: number;
+  /** Approx bytes/sec over last ~1s window (null until enough data). */
+  bytesPerSecWindow: number | null;
+};
+
 export type CaptureSession = {
   onFrame: (cb: (f: PcmFrame) => void) => void;
   /** Earliest energy onset while waiting for VAD confirmation (cleared on silence). */
@@ -41,6 +60,9 @@ export type CaptureSession = {
   /** Mark speech onset; uses soft onset span when longer than backdateFrames. */
   markSpeechStart: (backdateFrames?: number) => void;
   takeSegment: (padFrames: number) => Buffer;
+  /** Same segment as takeSegment plus raw WAV + clip/truncation meta (Phase 0). */
+  takeSegmentDetailed: (padFrames: number) => CaptureSegmentDetailed;
+  getHealth: () => CaptureHealth;
   stop: () => Promise<void>;
 };
 
@@ -79,28 +101,29 @@ class FrameRingBuffer {
   get count(): number {
     return this._count;
   }
+
+  get capacity(): number {
+    return this._buf.length;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // WAV header writer
 // ---------------------------------------------------------------------------
-function buildWavBuffer(s16leData: Buffer): Buffer {
+export function buildWavBuffer(s16leData: Buffer): Buffer {
   const dataSize = s16leData.length;
   const header = Buffer.alloc(44);
-  // RIFF chunk
   header.write("RIFF", 0, "ascii");
   header.writeUInt32LE(36 + dataSize, 4);
   header.write("WAVE", 8, "ascii");
-  // fmt sub-chunk
   header.write("fmt ", 12, "ascii");
-  header.writeUInt32LE(16, 16);             // sub-chunk size
-  header.writeUInt16LE(1, 20);              // PCM
-  header.writeUInt16LE(1, 22);              // mono
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
   header.writeUInt32LE(SAMPLE_RATE, 24);
-  header.writeUInt32LE(SAMPLE_RATE * 2, 28); // byte rate
-  header.writeUInt16LE(2, 32);              // block align
-  header.writeUInt16LE(16, 34);             // bits per sample
-  // data sub-chunk
+  header.writeUInt32LE(SAMPLE_RATE * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
   header.write("data", 36, "ascii");
   header.writeUInt32LE(dataSize, 40);
   return Buffer.concat([header, s16leData]);
@@ -119,13 +142,13 @@ function resolveAudioInput(ffmpegPath: string): string {
   return resolveDshowAudioInput(ffmpegPath);
 }
 
-function resolveMicGain(): number {
+export function resolveMicGain(): number {
   const raw = process.env["SPEAKFLOW_MIC_GAIN"]?.trim();
   const gain = raw ? Number(raw) : 20;
   return Number.isFinite(gain) && gain > 0 ? gain : 20;
 }
 
-function applyGainToS16le(s16le: Buffer, gain: number): Buffer {
+export function applyGainToS16le(s16le: Buffer, gain: number): Buffer {
   const out = Buffer.alloc(s16le.length);
   for (let i = 0; i < s16le.length; i += 2) {
     const amplified = Math.round(s16le.readInt16LE(i) * gain);
@@ -149,23 +172,42 @@ function frameStats(frameBytes: Buffer, gain: number): { float32: Float32Array; 
   return { float32, rms: Math.sqrt(sumSq / FRAME_SAMPLES), peak };
 }
 
+function isFfmpegRealtimeDropLine(line: string): boolean {
+  const lower = line.toLowerCase();
+  return (
+    lower.includes("real-time buffer") ||
+    lower.includes("frame dropped") ||
+    lower.includes("thread message queue blocking") ||
+    lower.includes("queue input") && lower.includes("full")
+  );
+}
+
 // ---------------------------------------------------------------------------
 // startContinuousCapture
 // ---------------------------------------------------------------------------
 export const startContinuousCapture = (): Result<CaptureSession, RecorderError> => {
   const ring = new FrameRingBuffer(RING_BUFFER_FRAMES);
-  let partial = Buffer.alloc(0);           // byte accumulator for partial frames
+  let partial = Buffer.alloc(0);
   let stopped = false;
   let intentionalStop = false;
   let totalFrames = 0;
   let speechStartFrame: number | null = null;
   let softOnsetFrame: number | null = null;
+  let lastSoftOnsetAtStart: number | null = null;
+  let lastBackdateUsed = 0;
   const frameListeners: Array<(f: PcmFrame) => void> = [];
   const micGain = resolveMicGain();
-  const captureDebug = process.env["SPEAKFLOW_VAD_DEBUG"] === "1";
+  const captureDebug = process.env["SPEAKFLOW_VAD_DEBUG"] === "1" || isCaptureDiagEnabled();
   let debugFrameCount = 0;
   let debugPeak = 0;
   let debugRmsMax = 0;
+
+  const ffmpegSpawnMs = performance.now();
+  let firstPcmMs: number | null = null;
+  let ffmpegRterrCount = 0;
+  let windowBytes = 0;
+  let windowStartMs = ffmpegSpawnMs;
+  let bytesPerSecWindow: number | null = null;
 
   try {
     const ffmpegPath = resolveFFmpeg();
@@ -184,14 +226,23 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
 
     const writable = new Writable({
       write(chunk: Buffer, _enc, cb) {
-        // Accumulate bytes; slice into exact 1024-byte (512-sample) frames
+        if (firstPcmMs === null && chunk.length > 0) {
+          firstPcmMs = performance.now();
+        }
+        windowBytes += chunk.length;
+        const now = performance.now();
+        if (now - windowStartMs >= 1000) {
+          bytesPerSecWindow = (windowBytes * 1000) / (now - windowStartMs);
+          windowBytes = 0;
+          windowStartMs = now;
+        }
+
         let buf = Buffer.concat([partial, chunk]);
 
         while (buf.length >= FRAME_BYTES) {
           const frameBytes = buf.slice(0, FRAME_BYTES);
           buf = buf.slice(FRAME_BYTES);
 
-          // Store raw s16le in ring buffer
           ring.push(Buffer.from(frameBytes));
           totalFrames++;
 
@@ -235,7 +286,11 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
     proc.stderr?.on("data", (chunk: Buffer) => {
       if (intentionalStop) return;
       const line = chunk.toString("utf8").trim();
-      if (line && !line.includes("size=")) {
+      if (!line) return;
+      if (isFfmpegRealtimeDropLine(line)) {
+        ffmpegRterrCount++;
+      }
+      if (!line.includes("size=")) {
         process.stderr.write(`[capture] ffmpeg: ${line}\n`);
       }
     });
@@ -245,6 +300,78 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
     });
 
     stream.pipe(writable);
+
+    const takeDetailed = (padFrames: number): CaptureSegmentDetailed => {
+      if (speechStartFrame === null) {
+        const empty = Buffer.alloc(0);
+        const emptyMeta: CaptureSegmentMeta = {
+          speechStartFrame: -1,
+          speechEndFrame: totalFrames,
+          speechFrameCount: 0,
+          padFrames,
+          takeCount: 0,
+          ringCount: ring.count,
+          ringCapacity: ring.capacity,
+          truncated: false,
+          softOnsetFrame: lastSoftOnsetAtStart,
+          backdateFramesUsed: lastBackdateUsed,
+          micGain,
+          totalFrames,
+          rawPeak: 0,
+          rawClipSamples: 0,
+          gainedPeak: 0,
+          gainedClipSamples: 0,
+          gainedClipFrac: 0,
+          sampleRate: SAMPLE_RATE,
+        };
+        return {
+          gainedWav: buildWavBuffer(empty),
+          rawWav: buildWavBuffer(empty),
+          rawPcm: empty,
+          gainedPcm: empty,
+          meta: emptyMeta,
+        };
+      }
+
+      const start = speechStartFrame;
+      const speechFrameCount = totalFrames - start;
+      const totalToTake = padFrames + speechFrameCount;
+      const truncated = totalToTake > ring.count;
+      const frames = ring.getLast(totalToTake);
+      const rawPcm = Buffer.concat(frames);
+      const gainedPcm = applyGainToS16le(rawPcm, micGain);
+      const rawClip = countClipSamplesS16le(rawPcm, 1);
+      const gainedClip = countClipSamplesS16le(rawPcm, micGain);
+      const sampleCount = rawPcm.length / 2;
+      const meta: CaptureSegmentMeta = {
+        speechStartFrame: start,
+        speechEndFrame: totalFrames,
+        speechFrameCount,
+        padFrames,
+        takeCount: frames.length,
+        ringCount: ring.count,
+        ringCapacity: ring.capacity,
+        truncated,
+        softOnsetFrame: lastSoftOnsetAtStart,
+        backdateFramesUsed: lastBackdateUsed,
+        micGain,
+        totalFrames,
+        rawPeak: rawClip.peak,
+        rawClipSamples: rawClip.clipSamples,
+        gainedPeak: Math.min(32767, Math.round(gainedClip.peak * micGain)),
+        gainedClipSamples: gainedClip.clipSamples,
+        gainedClipFrac: sampleCount > 0 ? gainedClip.clipSamples / sampleCount : 0,
+        sampleRate: SAMPLE_RATE,
+      };
+      speechStartFrame = null;
+      return {
+        gainedWav: buildWavBuffer(gainedPcm),
+        rawWav: buildWavBuffer(rawPcm),
+        rawPcm,
+        gainedPcm,
+        meta,
+      };
+    };
 
     const session: CaptureSession = {
       onFrame(cb) {
@@ -261,22 +388,35 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
 
       markSpeechStart(backdateFrames = 0) {
         let back = backdateFrames;
+        lastSoftOnsetAtStart = softOnsetFrame;
         if (softOnsetFrame !== null) {
           back = Math.max(back, totalFrames - softOnsetFrame);
         }
         back = Math.max(0, Math.min(back, totalFrames));
+        lastBackdateUsed = back;
         speechStartFrame = totalFrames - back;
         softOnsetFrame = null;
       },
 
       takeSegment(padFrames) {
-        if (speechStartFrame === null) return buildWavBuffer(Buffer.alloc(0));
-        const speechFrameCount = totalFrames - speechStartFrame;
-        const totalToTake = padFrames + speechFrameCount;
-        const frames = ring.getLast(totalToTake);
-        const s16le = applyGainToS16le(Buffer.concat(frames), micGain);
-        speechStartFrame = null;
-        return buildWavBuffer(s16le);
+        return takeDetailed(padFrames).gainedWav;
+      },
+
+      takeSegmentDetailed(padFrames) {
+        return takeDetailed(padFrames);
+      },
+
+      getHealth() {
+        return {
+          deviceId: audioInput,
+          micGain,
+          ffmpegSpawnMs,
+          firstPcmMs,
+          ttfbMs: firstPcmMs !== null ? firstPcmMs - ffmpegSpawnMs : null,
+          ffmpegRterrCount,
+          totalFrames,
+          bytesPerSecWindow,
+        };
       },
 
       stop() {
