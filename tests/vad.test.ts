@@ -65,7 +65,7 @@ function makeCaptureMock() {
         padFrames: 1,
         takeCount: 1,
         ringCount: 1,
-        ringCapacity: 300,
+        ringCapacity: 600,
         truncated: false,
         softOnsetFrame: null,
         backdateFramesUsed: 0,

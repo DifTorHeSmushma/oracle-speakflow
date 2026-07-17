@@ -54,11 +54,19 @@ export type CaptureHealth = {
 
 export type CaptureSession = {
   onFrame: (cb: (f: PcmFrame) => void) => void;
-  /** Earliest energy onset while waiting for VAD confirmation (cleared on silence). */
-  markSoftOnset: () => void;
+  /**
+   * Earliest energy onset while waiting for VAD confirmation (cleared on silence).
+   * Pass `atFrame` (enqueue-time totalFrames) when VAD processes behind the ring head
+   * so soft onset is not stamped on the lagged live clock.
+   */
+  markSoftOnset: (atFrame?: number) => void;
   clearSoftOnset: () => void;
-  /** Mark speech onset; uses soft onset span when longer than backdateFrames. */
-  markSpeechStart: (backdateFrames?: number) => void;
+  /**
+   * Mark speech onset; uses soft onset span when longer than backdateFrames.
+   * Pass `atFrame` (enqueue-time totalFrames) when VAD is lagged — takeSegment still
+   * ends at the live ring head via getLast.
+   */
+  markSpeechStart: (backdateFrames?: number, atFrame?: number) => void;
   takeSegment: (padFrames: number) => Buffer;
   /** Same segment as takeSegment plus raw WAV + clip/truncation meta (Phase 0). */
   takeSegmentDetailed: (padFrames: number) => CaptureSegmentDetailed;
@@ -378,23 +386,25 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
         frameListeners.push(cb);
       },
 
-      markSoftOnset() {
-        if (softOnsetFrame === null) softOnsetFrame = totalFrames;
+      markSoftOnset(atFrame?: number) {
+        const idx = atFrame ?? totalFrames;
+        if (softOnsetFrame === null) softOnsetFrame = idx;
       },
 
       clearSoftOnset() {
         softOnsetFrame = null;
       },
 
-      markSpeechStart(backdateFrames = 0) {
+      markSpeechStart(backdateFrames = 0, atFrame?: number) {
+        const now = atFrame ?? totalFrames;
         let back = backdateFrames;
         lastSoftOnsetAtStart = softOnsetFrame;
         if (softOnsetFrame !== null) {
-          back = Math.max(back, totalFrames - softOnsetFrame);
+          back = Math.max(back, now - softOnsetFrame);
         }
-        back = Math.max(0, Math.min(back, totalFrames));
+        back = Math.max(0, Math.min(back, now));
         lastBackdateUsed = back;
-        speechStartFrame = totalFrames - back;
+        speechStartFrame = now - back;
         softOnsetFrame = null;
       },
 

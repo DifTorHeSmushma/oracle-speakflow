@@ -151,14 +151,16 @@ export const createVad = async (
       }
     }
 
+    // Use enqueue-time frame index (not live totalFrames) so lagged ORT still
+    // stamps onset where the audio actually landed in the ring (Phase 1 / VAD lag).
     if (!inSpeech && rms >= rmsSpeechThreshold * 0.45) {
-      capture.markSoftOnset();
+      capture.markSoftOnset(enqueueTotalFrames);
     }
 
     if (isSpeechFrame) {
       speechPositiveCount++;
       speechNegativeCount = 0;
-      if (!inSpeech) capture.markSoftOnset();
+      if (!inSpeech) capture.markSoftOnset(enqueueTotalFrames);
     } else if (isSilenceFrame) {
       speechNegativeCount++;
       speechPositiveCount = 0;
@@ -175,7 +177,7 @@ export const createVad = async (
         speechPositiveCount = 0;
         speechNegativeCount = 0;
         totalSpeechStartCount++;
-        capture.markSpeechStart(backdate);
+        capture.markSpeechStart(backdate, enqueueTotalFrames);
         for (const cb of speechStartCbs) cb();
         process.stderr.write(
           `[vad] speechStart #${totalSpeechStartCount} (prob=${prob.toFixed(3)} rms=${rms.toFixed(4)} backdate=${backdate} lag=${lagFrames} qMax=${vadQueueDepthMax})\n`

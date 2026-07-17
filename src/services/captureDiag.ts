@@ -6,7 +6,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const RING_BUFFER_FRAMES = 300;
+/** ~19.2 s at 32 ms/frame — sized so long dictation does not drop utterance onset (was 300 / ~9.6 s). */
+export const RING_BUFFER_FRAMES = 600;
 export const FRAME_SAMPLES = 512;
 export const FRAME_BYTES = FRAME_SAMPLES * 2;
 export const SAMPLE_RATE = 16_000;

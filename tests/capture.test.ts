@@ -65,4 +65,22 @@ describe("capture service", () => {
     const wav = result.value.takeSegment(0);
     expect(wav.length).toBe(44 + 5 * FRAME_BYTES);
   });
+
+  it("speech start uses atFrame clock when VAD process is lagged", () => {
+    const result = startContinuousCapture();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // Ring advances to 20 while VAD is still deciding on frame 10.
+    for (let i = 0; i < 20; i++) pushFrame(proc, 100);
+    result.value.markSoftOnset(5);
+    result.value.markSpeechStart(3, 10); // soft span wins → start at frame 5
+    for (let i = 0; i < 5; i++) pushFrame(proc, 200);
+
+    // Live head=25, start=5 → 20 frames (not ~8 if stamped on live clock).
+    const detailed = result.value.takeSegmentDetailed(0);
+    expect(detailed.meta.speechStartFrame).toBe(5);
+    expect(detailed.meta.speechFrameCount).toBe(20);
+    expect(detailed.gainedWav.length).toBe(44 + 20 * FRAME_BYTES);
+  });
 });

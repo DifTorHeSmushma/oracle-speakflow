@@ -1,35 +1,44 @@
 # Windows Quality Regression Log
 
-## Status: PHASE 0 IN PROGRESS
-**Date:** 2026-07-16
-**Reporter:** User (via Agent)
+## Status: WINDOWS CLOUD PATH LOCKED (2026-07-17) — local STT deferred
+
+**Ship / use this combination until local is revisited:**
+
+| Keep | Setting | Why |
+|------|---------|-----|
+| Cloud STT | `SPEAKFLOW_TRANSCRIPTION_MODE=remote` + Groq key + `whisper-large-v3-turbo` | Local Fast (`tiny`) produced garbage even on clear audio |
+| Default VAD | `preSpeechPadFrames=20`, `redemptionFrames=40`, thresholds 0.42/0.28, `minSpeechFrames=6` | Saved harsh VAD (pad 5 / redemption 16) chopped sentences |
+| Bigger ring | `RING_BUFFER_FRAMES=600` (~19.2 s) in code | At 300, long utterances set `truncated: true` and dropped opening words |
+| Phase 1 clock | enqueue-time soft onset / speech start | Correct under VAD lag; keep with ship |
+
+**Do not switch back to Local/Fast for daily drafting until a dedicated local-quality pass.**
+
+**Operator config file (this machine):** `%APPDATA%\Electron\.env`  
+Backup of pre-recovery harsh settings: `%APPDATA%\Electron\.env.bak-2026-07-17-pre-recovery`
+
+**Deferred:** local Whisper quality (balanced/accurate + VAD retune). **Next product spine:** finish macOS + Linux build/parity; then revisit local.
+
+**Pass smoke (2026-07-17):**  
+`Testing 1234 ABCDE the quick brown fox wants to build financial abundance and multimillionaire with AI`  
+Diag: ~13s segment, `truncated: false`, `remote`, pad 20, ring 600.
+
+---
+
+## History
 
 ### Problem Description
-Users on Windows 11 reporting significant degradation in transcription reliability and quality. The system is failing to meet the "reliable daily driver" bar.
+Users on Windows 11 reporting significant degradation in transcription reliability and quality.
 
 ### Reported Symptoms
-1.  **Missing Start Words:** The first one or two words of almost every utterance are clipped.
-2.  **Mid-Sentence Dropouts:** Words are missing from the middle of sentences, leading to fragmented output.
-3.  **High Word Error Rate (WER):** Frequent misinterpretations of words even when captured.
+1. Missing start words
+2. Mid-sentence dropouts
+3. High WER / jammed text
 
-### Evidence (Verbatim Example)
-> "aspects. So we have the explainer video from the
-> Count of us screen recording. And then I also want to introduce theSo this is the app.advice and then there is the... this...that the athlete bobs into and they can monitor their metrics.
-> [BLANK_AUDIO]If there's various different aspects, I won't.Um,run through that and then demonstration and then we and then also share it some screenshots of theNow we'll cut share screenshots of the user interface or I could do an on-screen recording.with obvious of the main.What you suggest is the most suitable use case in this scenario given the data that I've commented upon."
+### Phase 0 (2026-07-16)
+Diag pack: dual WAV + JSONL. Primary signal VAD lag; gain secondary.
 
-### Phase 0 (approved 2026-07-16)
-Spec: `docs/DESIGN/PHASE0_CAPTURE_DIAG_SPEC.md`
+### Phase 1 VAD lag clock (2026-07-16)
+Enqueue-time onset stamps. Alone insufficient while Local Fast + harsh VAD persisted.
 
-Enable: `SPEAKFLOW_CAPTURE_DIAG=1`
-
-Artifacts under `%APPDATA%/oracle-speakflow/capture-diag/` (or Electron `userData/capture-diag/`):
-- `{id}.raw.wav` / `{id}.gained.wav`
-- `utterances.jsonl`
-
-**No default gain/VAD/FFmpeg changes in Phase 0.**
-
-### Next Steps
-- [x] Phase 0 instrumentation (dual WAV + JSONL + lag/discard/clip/ring)
-- [ ] Human reproduce with `SPEAKFLOW_CAPTURE_DIAG=1` and collect pack
-- [ ] Apply split decision tree → Phase 1 one lever
-- [ ] WASAPI only if Phase 0 proves dshow continuity failure after buffers
+### Config recovery (2026-07-17)
+Cloud + default VAD → large jump. Ring 300→600 → first words restored on long fox sentence.
