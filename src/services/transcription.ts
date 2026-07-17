@@ -20,7 +20,10 @@ export type TranscriptionError =
   | { kind: "localModelNotFound"; message: string }
   | { kind: "localTranscriptionFailed"; message: string };
 
-const RETRY_ATTEMPTS = 2;
+/** Cloud (Groq) hard ceiling — SDK default is 60s; that produced 50–90s "transcribing" hangs. */
+export const CLOUD_TRANSCRIBE_TIMEOUT_MS = 10_000;
+/** No cloud retries under the hard ceiling — one attempt, fail fast. */
+const CLOUD_RETRY_ATTEMPTS = 0;
 const RETRY_DELAY_MS = 500;
 
 /** Node.js network error codes that map to a transient timeout/network failure. */
@@ -35,9 +38,16 @@ const NETWORK_ERROR_CODES = new Set([
 const isNetworkError = (err: unknown): boolean => {
   const code = (err as NodeJS.ErrnoException).code;
   if (code !== undefined && NETWORK_ERROR_CODES.has(code)) return true;
+  const name = err instanceof Error ? err.name : "";
+  if (name === "APIConnectionTimeoutError" || name === "AbortError") return true;
   // Fallback: SDK may wrap fetch errors without a .code property.
   const message = err instanceof Error ? err.message.toLowerCase() : "";
-  return message.includes("fetch failed") || message.includes("network");
+  return (
+    message.includes("fetch failed") ||
+    message.includes("network") ||
+    message.includes("timed out") ||
+    message.includes("timeout")
+  );
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -89,19 +99,33 @@ const transcribeRemote = async (
   model: string,
   language: string
 ): Promise<Result<string, TranscriptionError>> => {
-  const client = new Groq({ apiKey });
+  // Hard timeout on the client (default was 60s → multi-minute hangs with retries).
+  const client = new Groq({ apiKey, timeout: CLOUD_TRANSCRIBE_TIMEOUT_MS });
+  const t0 = performance.now();
+  const maxAttempts = CLOUD_RETRY_ATTEMPTS + 1;
 
-  for (let i = 0; i <= RETRY_ATTEMPTS; i++) {
+  for (let i = 0; i < maxAttempts; i++) {
     const result = await attempt(client, audioBuffer, model, language);
-    if (result.ok) return result;
+    const ms = Math.round(performance.now() - t0);
+    if (result.ok) {
+      process.stderr.write(`[LATENCY] cloud-transcribe: ${ms} ms ok model=${model} bytes=${audioBuffer.length}\n`);
+      return result;
+    }
 
-    const shouldRetry = result.error.kind === "networkTimeout" && i < RETRY_ATTEMPTS;
-    if (!shouldRetry) return result;
+    const shouldRetry = result.error.kind === "networkTimeout" && i < CLOUD_RETRY_ATTEMPTS;
+    if (!shouldRetry) {
+      process.stderr.write(
+        `[LATENCY] cloud-transcribe: ${ms} ms fail kind=${result.error.kind} model=${model} bytes=${audioBuffer.length}\n`
+      );
+      return result;
+    }
 
     await sleep(RETRY_DELAY_MS);
   }
 
-  return Err({ kind: "networkTimeout", message: "Exhausted retries" });
+  const ms = Math.round(performance.now() - t0);
+  process.stderr.write(`[LATENCY] cloud-transcribe: ${ms} ms fail kind=networkTimeout model=${model}\n`);
+  return Err({ kind: "networkTimeout", message: `Cloud transcription exceeded ${CLOUD_TRANSCRIBE_TIMEOUT_MS}ms` });
 };
 
 // ---------------------------------------------------------------------------

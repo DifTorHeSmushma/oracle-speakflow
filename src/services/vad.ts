@@ -138,7 +138,10 @@ export const createVad = async (
       prob >= cfg.positiveSpeechThreshold ||
       (rms >= rmsSpeechThreshold && prob >= 0.015) ||
       rms >= rmsSpeechThreshold * 2;
-    const isSilenceFrame = prob < cfg.negativeSpeechThreshold && rms < rmsSpeechThreshold;
+    // When already in speech, loosen RMS silence gate so laptop fan / room noise
+    // does not block end-of-utterance for tens of seconds (hands-free latency).
+    const silenceRmsLimit = inSpeech ? rmsSpeechThreshold * 3 : rmsSpeechThreshold;
+    const isSilenceFrame = prob < cfg.negativeSpeechThreshold && rms < silenceRmsLimit;
 
     if (vadDebug) {
       debugFrameCount++;

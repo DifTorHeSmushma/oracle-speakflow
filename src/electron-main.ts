@@ -2,7 +2,7 @@ import { app, BrowserWindow, Tray, nativeImage, ipcMain, screen, clipboard, Menu
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
-import { createReadStream, watch, writeFileSync, readFileSync, existsSync, unlinkSync, statSync } from "node:fs";
+import { createReadStream, watch, writeFileSync, readFileSync, existsSync, unlinkSync, statSync, appendFileSync } from "node:fs";
 import { exec } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import type { FSWatcher } from "node:fs";
@@ -91,6 +91,16 @@ let configDir = process.cwd();
 
 // Live config — loaded from userData in app.whenReady() (Invariant: userData overrides dev .env)
 let liveConfig = loadConfig(configDir);
+
+/** Always-on latency breadcrumb (not gated on CAPTURE_DIAG) — `%APPDATA%/Electron/latency.jsonl`. */
+function appendLatencyLog(row: Record<string, unknown>): void {
+  try {
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...row }) + "\n";
+    appendFileSync(join(configDir, "latency.jsonl"), line, "utf8");
+  } catch {
+    /* best-effort */
+  }
+}
 
 // Active hotkey (may be updated live via config-update)
 let activeHotkey: HotkeyConfig = DEFAULT_HOTKEY;
@@ -390,6 +400,15 @@ async function startContinuousMode(): Promise<void> {
       // Capture target at utterance end (closer to inject than speechStart — hands-free latency fix).
       captureTargetHwnd();
       const t0 = performance.now();
+      appendLatencyLog({
+        event: "speech_end",
+        voiceMode: "handsFree",
+        wavBytes: wav.length,
+        audioSec: Math.round(((wav.length - 44) / 32000) * 100) / 100,
+        vadQueueDepthMax: payload.vadQueueDepthMax,
+        vadProcessLagFrames: payload.vadProcessLagFrames,
+        ortRunMsLast: payload.ortRunMsLast,
+      });
       runPipeline(wav, "handsFree", t0).catch((err: unknown) => {
         console.error("[HF] unhandled pipeline error:", err);
         flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
@@ -465,11 +484,29 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
     console.log(`[LATENCY] capture-end→transcribe-start: ${(performance.now() - captureEndT0).toFixed(0)} ms`);
   }
   console.log("transcribing...");
+  const transcribeT0 = performance.now();
+  const audioSec = Math.round(((wavBuffer.length - 44) / 32000) * 100) / 100;
 
   const textResult = await transcribe(
     groqApiKey, wavBuffer, model, language, transcriptionMode,
     modelTier, searchDirs, activeEngineHandle ?? undefined,
   );
+
+  const transcribeWallMs = Math.round(performance.now() - transcribeT0);
+  console.log(
+    `[LATENCY] transcribe-wall: ${transcribeWallMs} ms mode=${transcriptionMode}`
+  );
+  appendLatencyLog({
+    event: "transcribe_done",
+    voiceMode,
+    mode: transcriptionMode,
+    model,
+    audioSec,
+    wavBytes: wavBuffer.length,
+    transcribeWallMs,
+    ok: textResult.ok,
+    errKind: textResult.ok ? null : textResult.error.kind,
+  });
 
   if (isErr(textResult)) {
     const { error } = textResult;
@@ -709,7 +746,14 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   const preview = text;
   console.log(`done. > "${preview.slice(0, 72)}${preview.length > 72 ? "..." : ""}"`);
   if (captureEndT0 !== undefined) {
-    console.log(`[LATENCY] capture-end→paste-complete: ${(performance.now() - captureEndT0).toFixed(0)} ms`);
+    const pasteCompleteMs = Math.round(performance.now() - captureEndT0);
+    console.log(`[LATENCY] capture-end→paste-complete: ${pasteCompleteMs} ms`);
+    appendLatencyLog({
+      event: "paste_complete",
+      voiceMode,
+      pasteCompleteMs,
+      textChars: text.length,
+    });
   }
 
   // Persist to shared MCP history.

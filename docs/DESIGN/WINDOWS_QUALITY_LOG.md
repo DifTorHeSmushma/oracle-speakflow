@@ -22,6 +22,8 @@ Backup of pre-recovery harsh settings: `%APPDATA%\Electron\.env.bak-2026-07-17-p
 `Testing 1234 ABCDE the quick brown fox wants to build financial abundance and multimillionaire with AI`  
 Diag: ~13s segment, `truncated: false`, `remote`, pad 20, ring 600.
 
+**Latency (2026-07-17):** Cloud Groq client timeout **10s** (was SDK default 60s) + no cloud retries — stops 50–90s “transcribing” hangs. Logs: `[LATENCY] cloud-transcribe:` / `transcribe-wall:` + always-on `%APPDATA%/Electron/latency.jsonl`. Hands-free silence gate loosened under fan noise. **Accepted UX:** ~7s last-word→paste (cloud ~1.7s; speech-end→paste ~4s).
+
 ---
 
 ## History

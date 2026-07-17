@@ -86,7 +86,10 @@ describe("transcription service", () => {
   const dummyBuffer = Buffer.from("fake-wav-data");
   const apiKey = "sk-test-key";
 
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCreate.mockReset();
+  });
 
   // ---- Happy path ----------------------------------------------------------
 
@@ -136,7 +139,7 @@ describe("transcription service", () => {
 
   // ---- Network / transient errors -----------------------------------------
 
-  it("returns Err(networkTimeout) on ETIMEDOUT and retries twice before giving up", async () => {
+  it("returns Err(networkTimeout) on ETIMEDOUT and does not retry under cloud hard ceiling", async () => {
     const networkErr = Object.assign(new Error("connect failed"), { code: "ETIMEDOUT" });
     mockCreate.mockRejectedValue(networkErr);
 
@@ -144,8 +147,17 @@ describe("transcription service", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.kind).toBe("networkTimeout");
-    // RETRY_ATTEMPTS = 2 → initial attempt + 2 retries = 3 total calls
-    expect(mockCreate).toHaveBeenCalledTimes(3);
+    // CLOUD_RETRY_ATTEMPTS = 0 → single attempt (fail fast; no 3×60s hangs)
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("constructs Groq client with 10s cloud timeout", async () => {
+    const Groq = (await import("groq-sdk")).default as unknown as ReturnType<typeof vi.fn>;
+    mockCreate.mockResolvedValueOnce("ok");
+    await transcribe(apiKey, dummyBuffer, "whisper-large-v3-turbo", "en");
+    expect(Groq).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey, timeout: 10_000 })
+    );
   });
 
   it("returns Err(networkTimeout) on ECONNRESET", async () => {
@@ -158,15 +170,15 @@ describe("transcription service", () => {
     if (!result.ok) expect(result.error.kind).toBe("networkTimeout");
   });
 
-  it("succeeds on second attempt after transient network error", async () => {
+  it("does not retry cloud after transient network error (fail fast)", async () => {
     const networkErr = Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
     mockCreate.mockRejectedValueOnce(networkErr).mockResolvedValueOnce("Hello after retry");
 
     const result = await transcribe(apiKey, dummyBuffer, "whisper-large-v3-turbo", "en");
 
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value).toBe("Hello after retry");
-    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("networkTimeout");
+    expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -180,6 +192,7 @@ describe("transcription service (local mode)", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCreate.mockReset();
     mockGetBinaryPath.mockReturnValue(whisperPath);
     // Default: model resolves OK — tests that need a failure override this.
     mockResolveTierModel.mockReturnValue({ ok: true, value: resolvedModelPath });
