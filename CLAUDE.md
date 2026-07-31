@@ -1,5 +1,29 @@
 # Oracle SpeakFlow — Global Rules
 
+## AI LAYER
+
+Agent skills: `.claude/commands/`. Full loop + stop rules: `AI_LAYER.md`.
+
+**Ticket:** GitHub Issues (`DifTorHeSmushma/oracle-speakflow`). **Spec:** `docs/DESIGN/`.
+
+**Loop:** ticket `#N` → `/prime` → `/plan` → (approve) → `/execute` → `/validate` → `/commit` → PR `Fixes #N`.  
+Bugs: `/rca` → `/implement-fix` (or one-line waiver).
+
+**Stop rules:**
+1. No feature implement without GitHub issue `#N` in the session.
+2. No `/execute` without an approved `/plan`.
+3. No PR without `/validate` considered.
+4. Bugs run `/rca` (or explicit one-line waiver).
+5. Recurring failure classes update a rule here or a skill under `.claude/commands/`.
+
+**Session open:**
+```
+Working on SpeakFlow issue #<N>. Spec: docs/DESIGN/<path>.
+Run /prime then /plan. Do not write feature code until I approve the plan.
+```
+
+---
+
 ## What This System Does
 A Windows speech-to-paste daemon. User presses Ctrl+Shift+R → holds to record → releases →
 Groq Whisper transcribes → text is injected at the active window's cursor position.
