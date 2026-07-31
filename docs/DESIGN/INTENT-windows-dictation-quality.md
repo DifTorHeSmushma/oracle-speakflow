@@ -146,6 +146,19 @@ Dom dictates a multi-sentence thought (with ≤2 s pauses) into chat/IDE on Wind
 
 ---
 
+## Deferred UX note — chrome / HUD (2026-07-31, Dom)
+
+**Not in this milestone’s thin-slice** (dictation quality / streaming bar first). Capture so it is not lost:
+
+| | Oracle SpeakFlow (today) | Aqua Voice |
+| :--- | :--- | :--- |
+| **Chrome** | Large on-screen **box / panel** that sits on the monitor and visually (and often focus-wise) interferes with whatever is behind it | App can be **fully minimized**; only a **very small icon** sits mid-bottom of the monitor / over the IDE |
+| **Goal (later)** | Match Aqua’s **minimal presence**: tiny bottom-center affordance while dictating; no huge blocking box over the work surface |
+
+Track as a follow-up issue after #6 streaming/quality gates are green (or spike in parallel only if Dom prioritizes). Working name: **“minimal HUD / Aqua-like tray presence.”**
+
+---
+
 ## Non-goals
 
 - Platform work as substitute for dictation trust  
