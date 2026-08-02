@@ -13,6 +13,7 @@
   const LANGUAGES = [
     { value: "auto", label: "Auto-detect" },
     { value: "en",   label: "English" },
+    { value: "th",   label: "Thai (ไทย)" },
     { value: "es",   label: "Spanish" },
     { value: "fr",   label: "French" },
     { value: "de",   label: "German" },

@@ -84,6 +84,8 @@ Your key is stored locally in `%APPDATA%\oracle-speakflow\.env` (Windows) — ne
 
 Click **Save** at the bottom of Settings when you change Voice or Engine tabs. The **Dictionary** tab saves each entry automatically when you click **Add**.
 
+**Language (Thai / English):** Settings → **Engine** → **Language**. Pick **Thai (ไทย)** or **English** anytime. New installs on a Thai Windows/macOS locale default to Thai; English locales still default to English. Existing installs that already saved a language are unchanged. Use a multilingual Groq model (Turbo or Large v3) — not Distil English-only — for Thai.
+
 ### Daily use
 
 1. Click the **tray icon** to open SpeakFlow (you can leave it open or close it — listening continues from the tray).
@@ -333,7 +335,7 @@ npm run typecheck && npm test && npm run test:ui && npm run test:integration
 | `SPEAKFLOW_FIRST_RUN_DISMISSED` | One-time privacy explainer dismissed |
 | `SPEAKFLOW_TRANSCRIPTION_MODE` | `remote` or `local` |
 | `SPEAKFLOW_MODEL` | Groq model id |
-| `SPEAKFLOW_LANGUAGE` | Language code |
+| `SPEAKFLOW_LANGUAGE` | Language code (`en`, `th`, `auto`, …). Unset → Thai OS UI defaults to `th`, otherwise `en` |
 | `dictionary.json` | Personal dictionary (import/export via Settings) |
 
 Location: `%APPDATA%\oracle-speakflow\`

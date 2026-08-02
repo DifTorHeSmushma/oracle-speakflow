@@ -65,10 +65,12 @@ const attempt = async (
   try {
     // Convert Buffer → Uint8Array so File constructor accepts it under strict lib settings.
     const file = new File([new Uint8Array(audioBuffer)], "recording.wav", { type: "audio/wav" });
+    // Whisper: omit language for auto-detect. Never send the literal "auto".
+    const lang = language.trim().toLowerCase();
     const response = await client.audio.transcriptions.create({
       file,
       model,
-      language,
+      ...(lang && lang !== "auto" ? { language: lang } : {}),
       response_format: "text",
     });
 
