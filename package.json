@@ -1,9 +1,29 @@
 {
   "name": "oracle-speakflow",
   "version": "0.1.0",
-  "description": "Speech-to-paste daemon: hotkey → Groq Whisper → inject text at cursor",
+  "description": "Hands-free speech-to-text that pastes into whatever app has focus — for anyone who types all day (writers, teachers, admins, developers).",
   "type": "module",
   "main": "dist/electron-main.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DifTorHeSmushma/oracle-speakflow.git"
+  },
+  "homepage": "https://github.com/DifTorHeSmushma/oracle-speakflow#readme",
+  "bugs": {
+    "url": "https://github.com/DifTorHeSmushma/oracle-speakflow/issues"
+  },
+  "license": "MIT",
+  "author": "Domenic Young",
+  "keywords": [
+    "speech-to-text",
+    "dictation",
+    "whisper",
+    "groq",
+    "electron",
+    "accessibility",
+    "voice-to-text",
+    "hands-free"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",

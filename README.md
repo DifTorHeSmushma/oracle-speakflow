@@ -10,9 +10,23 @@
 
 </div>
 
-Fast voice-to-text for anyone who types: speak naturally — **hands-free** or with a hotkey — and your transcript is pasted into **whatever app already has focus** (IDE, browser, chat, docs, email, terminal, and more).
+Fast **speech-to-text (STT)** for anyone who types all day: speak naturally — **hands-free** or with a hotkey — and your words are pasted into **whatever app already has focus** (Word, Docs, email, chat, browser, IDE, terminal, and more).
 
 **Listen → Transcribe (Groq cloud or local Whisper) → Correct → Paste where you're typing**
+
+### Who it’s for (daily use)
+
+Oracle SpeakFlow is built for **real desk work**, not demo clips:
+
+| Role | Typical use |
+|------|-------------|
+| **Admin / secretary / EA** | Dictate emails, letters, meeting notes, and forms without leaving Outlook or Docs |
+| **Teachers & trainers** | Draft lesson plans, feedback, and messages while staying in the tools you already use |
+| **Writers & students** | Long-form drafting into any editor — hands stay off the keyboard when thinking out loud |
+| **Developers & power users** | Dictate into Cursor, terminals, chat, and tickets (personal dictionary for jargon) |
+| **Anyone with RSI or accessibility needs** | Reduce typing load with hands-free VAD or push-to-talk |
+
+One Electron app; Windows is the deep daily-driver. macOS and Linux share the same codebase with OS adapters (see below).
 
 <div align="center">
 
@@ -34,13 +48,15 @@ Any assistance — buying me a coffee or a donation — is greatly appreciated a
 
 ## Platform support
 
+**One Electron codebase** — shared pipeline (capture → VAD → transcribe → dictionary → paste). Thin native adapters per OS (mic, foreground window, paste chord).
+
 | Platform | Status | What you get |
 |----------|--------|----------------|
-| **Windows** | ✅ Shipped | NSIS installer (`npm run package`); bundled local Whisper (Fast tier); hands-free + paste |
-| **macOS** | 🟡 Beta (CI-built) | `.dmg` + `.zip` from **Mac Package** workflow. **Parity wave 7a:** avfoundation mic, Cmd+V paste, Accessibility. Grant **Microphone** + **Accessibility** in System Settings. Cloud transcribe; local Whisper not bundled yet. Gatekeeper: right-click → **Open**. |
-| **Linux** | ⏳ In progress (M7) | Ubuntu CI runs tests on every push — **no installable build yet** |
+| **Windows** | ✅ Primary / shipped | NSIS installer; hands-free VAD; Groq cloud (default) + bundled local Whisper (Fast tier); personal dictionary; paste into focused apps |
+| **macOS** | 🟡 Beta (CI-built) | Same app; avfoundation mic, Cmd+V, Accessibility. **Proven on GitHub `macos-latest`:** Mac Package workflow builds `.dmg`/`.zip` and **G23-runner** verifies the `.app` on the cloud Mac. Cloud transcribe; local Whisper not bundled yet. Grant **Microphone** + **Accessibility**. |
+| **Linux** | 🟡 CI package proven | Same app; **`linux-package.yml`** builds **deb + AppImage** on Ubuntu runners; **G28** headless launch + nut-js load probe green. Human **X11 dictation smoke (G32)** not filed yet — so we do **not** claim “Linux supported” for daily auto-paste until that smoke is recorded. |
 
-> **Honest scope:** Windows is the full product today. macOS is a **proof build** (launch + cloud transcribe), not full parity. Linux packaging is the next milestone.
+> **Honest scope:** Windows is the daily product. macOS is a **usable CI beta** (cloud path). Linux **packaging and launch are proven in CI**; desktop dictation smoke is the remaining gate before a supported claim. See [Actions → Mac Package](https://github.com/DifTorHeSmushma/oracle-speakflow/actions/workflows/mac-package.yml) and [Linux Package](https://github.com/DifTorHeSmushma/oracle-speakflow/actions/workflows/linux-package.yml).
 
 ## User guide
 
@@ -135,10 +151,11 @@ Click **Save** after changes.
 | **Quantum Leap — Wave 3** | ✅ Shipped + smoke-signed | Voice settings UI, personal dictionary UI, listening indicator, NSIS packaging |
 | **Local intelligence** | ✅ On `main` | Cloud vs Local mode, model downloader, whisper-cli sidecar wiring (Windows) |
 | **Windows installer** | ✅ `npm run package` | NSIS (`dist-installer/`), bundled VAD model + ONNX runtime unpack |
-| **macOS CI build** | ✅ Beta | `mac-package.yml` → DMG/ZIP artifacts; G23-runner bundle verify on cloud Mac |
-| **Linux installer** | ⏳ M7 | Planned — AppImage/deb + native paste/hotkey/mic |
+| **macOS CI build** | ✅ Beta | `mac-package.yml` → DMG/ZIP; **G23-runner** bundle verify on GitHub cloud Mac (no physical Mac required for build proof) |
+| **Linux CI package** | ✅ Factory green | `linux-package.yml` → deb + AppImage; **G28** launch verify + **G31** pulse smoke on Ubuntu runner |
+| **Linux desktop smoke** | ⏳ Pending | G32/G33 human X11 auto-paste protocol (`scripts/linux-x11-smoke.md`) — required before “supported” claim |
 
-> **Repo visibility:** The GitHub repository may still be **private** during active development. Clone and the Sponsor button work once the repo is public. Support links below work regardless.
+> **Build proof:** Mac and Linux installers are produced by deliberate `workflow_dispatch` (and `v*` tags) — not on every push — so public CI stays affordable. Download artifacts from the workflow run pages above.
 
 ## Features
 
@@ -279,7 +296,7 @@ See the [workflow diagram](docs/diagrams/Oracle_SpeakFlow_Workflow_Indigo.png) f
 - Node.js **20+**
 - **Windows** — primary dev and ship target
 - **macOS** — CI packages via `Mac Package` workflow; local Mac dev optional
-- **Linux** — CI test matrix only until M7 ships an installer
+- **Linux** — same repo; package via `linux-package.yml` (dispatch/tags); desktop G32 smoke before supported claim
 - FFmpeg on PATH for dev, or `resources/bin/ffmpeg.exe` (Windows)
 - Groq API key for cloud mode (required on macOS beta; optional on Windows if using local mode)
 
@@ -352,14 +369,17 @@ See `docs/DESIGN/MILESTONE_3_PRD.md`.
 - [x] **Quantum Leap Wave 3:** Voice + dictionary settings UI, installer bundling
 - [x] **Local intelligence:** Cloud/local mode + model downloader
 - [x] **Visual redesign:** shadcn-svelte Card layout, tabbed Settings Dialog
-- [x] **macOS (M6):** CI-built DMG/ZIP + G23-runner verify — beta, cloud path (proof not parity)
-- [ ] **Linux (M7):** Installable build + native paste/hotkey/mic
-- [ ] **macOS parity (M7):** Native paste, hotkeys, mic, bundled local Whisper
+- [x] **macOS (M6 / Wave 7a):** CI-built DMG/ZIP + G23-runner on cloud Mac — beta cloud path
+- [x] **Linux package factory (M7b waves):** `linux-package.yml` deb/AppImage + G28/G31 on Ubuntu CI
+- [ ] **Linux desktop claim:** File G32 X11 human smoke before README “supported”
+- [ ] **macOS parity:** Bundled local Whisper + closer delivery parity with Windows
 - [ ] **LLM correction pass:** Opt-in polish (not implemented; adds cost + latency)
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [CLAUDE.md](CLAUDE.md) (invariants and architecture).
+See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [CLAUDE.md](CLAUDE.md) (invariants and architecture).
+
+Security reports: [SECURITY.md](SECURITY.md).
 
 ## Privacy
 

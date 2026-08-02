@@ -32,8 +32,8 @@ Three **equal** circles arranged in a triangle — each centre is the same dista
 | Position | Layer | Role |
 |----------|-------|------|
 | Top | **INTELLIGENCE** | Groq cloud or bundled whisper-cli (Windows), 3-tier ladder, personal dictionary |
-| Lower left | **CAPTURE** | FFmpeg DirectShow, Silero VAD, mic gain |
-| Lower right | **DELIVERY** | Yield-focus guard, Ctrl+V, clipboard fallback |
+| Lower left | **CAPTURE** | FFmpeg per-OS mic (dshow / avfoundation / pulse), Silero VAD, mic gain |
+| Lower right | **DELIVERY** | Yield-focus guard, Ctrl/Cmd+V, clipboard fallback |
 
 Each utterance flows through all three in one pipeline pass.
 
@@ -58,13 +58,13 @@ Each utterance flows through all three in one pipeline pass.
 
 ---
 
-## Platforms (M6)
+## Platforms (build proof)
 
 | Platform | Status |
 |----------|--------|
 | **Windows** | Shipped — bundled Fast tier, offline local |
-| **macOS** | Beta — CI `.dmg`/`.zip`, cloud transcribe only |
-| **Linux** | M7 — CI tests only, no installer yet |
+| **macOS** | Beta — GitHub cloud Mac Package + G23-runner; cloud transcribe |
+| **Linux** | CI package — deb/AppImage + G28 launch; human X11 G32 smoke pending |
 
 ---
 
