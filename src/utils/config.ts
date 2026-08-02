@@ -36,6 +36,40 @@ const atLeast = (current: string | undefined, min: string): boolean =>
 export const DEFAULT_CALL_APP_ALLOWLIST = ["Zoom.exe", "Teams.exe", "ms-teams.exe", "Discord.exe"];
 
 /**
+ * First-run language when SPEAKFLOW_LANGUAGE is unset.
+ * English stays the default for English UI locales (unchanged for existing users who saved `en`).
+ * Thai OS / UI locales default to `th` so Thai friends can open and dictate immediately.
+ * Users can always switch Language in Settings → Engine (Thai ↔ English ↔ Auto).
+ */
+export const resolveDefaultLanguage = (
+  env: NodeJS.ProcessEnv = process.env,
+  intlLocale?: string
+): string => {
+  const locales: string[] = [];
+  const push = (raw: string | undefined): void => {
+    if (!raw) return;
+    for (const part of raw.split(/[.:;,\s]+/)) {
+      const t = part.trim();
+      if (t) locales.push(t);
+    }
+  };
+  push(env["SPEAKFLOW_OS_LOCALE"]);
+  push(env["LANG"]);
+  push(env["LC_ALL"]);
+  push(env["LC_MESSAGES"]);
+  try {
+    push(intlLocale ?? Intl.DateTimeFormat().resolvedOptions().locale);
+  } catch {
+    /* ignore */
+  }
+  for (const loc of locales) {
+    const n = loc.toLowerCase().replace(/_/g, "-");
+    if (n === "th" || n.startsWith("th-")) return "th";
+  }
+  return "en";
+};
+
+/**
  * Resolves the project root from the current working directory.
  * When run via npm scripts (npm run dev / start), cwd is always the project root.
  * For startup-task use, set GROQ_API_KEY as a Windows environment variable instead.
@@ -218,7 +252,10 @@ export const loadConfig = (
 
   // Persist user-overridden values via saveConfig; defaults apply on first run.
   const model = process.env["SPEAKFLOW_MODEL"]?.trim() ?? "whisper-large-v3-turbo";
-  const language = process.env["SPEAKFLOW_LANGUAGE"]?.trim() ?? "en";
+  // Explicit SPEAKFLOW_LANGUAGE (including "en") always wins — existing English installs unchanged.
+  const language =
+    process.env["SPEAKFLOW_LANGUAGE"]?.trim() || resolveDefaultLanguage(process.env);
+
   const hotkeyRaw = process.env["SPEAKFLOW_HOTKEY"]?.trim();
   const hotkey: Config["hotkey"] = hotkeyRaw
     ? (JSON.parse(hotkeyRaw) as Config["hotkey"])

@@ -89,6 +89,20 @@ let callAppPollTimer: ReturnType<typeof setInterval> | null = null;
 // cwd is the project root containing the .env file.
 let configDir = process.cwd();
 
+// Seed OS locale for first-run language default (Thai UI → th; English UI → en).
+// Existing SPEAKFLOW_LANGUAGE in userData .env always wins inside loadConfig.
+try {
+  if (!process.env["SPEAKFLOW_OS_LOCALE"]) {
+    const preferred =
+      typeof app.getPreferredSystemLanguages === "function"
+        ? app.getPreferredSystemLanguages()?.[0]
+        : undefined;
+    process.env["SPEAKFLOW_OS_LOCALE"] = preferred || app.getLocale() || "";
+  }
+} catch {
+  /* non-Electron / early import */
+}
+
 // Live config — loaded from userData in app.whenReady() (Invariant: userData overrides dev .env)
 let liveConfig = loadConfig(configDir);
 
