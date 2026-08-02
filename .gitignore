@@ -7,6 +7,11 @@ test.wav
 .env
 *.log
 
+# Local probes, HITL handoffs, WAVs, latency dumps — never publish
+tmp/
+*.wav
+!docs/**/*.wav
+
 # MCP / local stdio test artifacts (do not commit)
 mcp-test-stderr.txt
 scripts/mcp-stderr.txt

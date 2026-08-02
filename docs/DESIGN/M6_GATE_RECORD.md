@@ -21,7 +21,7 @@
 | **P1** Bundled local offline | M-1 / G21 | ✅ **PASS** — fresh install, flight mode, speak → paste (Fast tier) |
 | **P2** Three-tier ladder | G14–G17 | ✅ **CODE COMPLETE** — registry, downloader, TierPicker; Fast bundled |
 | **P3** Paste-while-focused | M-3 / G18 | ❌ **FAIL** → **PRD §3 P3 downgrade** (clipboard floor) |
-| **P4** macOS portability proof | M-5 / G23 | ⏸️ **Wave 4** — not started |
+| **P4** macOS portability proof | M-5 / G23 | ✅ **PASS (Path A)** — Mac Package + G23-runner on cloud Mac (2026-07-09); human mic Path B optional |
 
 **M6 realistic outcome (Spec §9b):** Bundled Fast offline + tier ladder + yield-focus **safety floor** + mac CI proof. Resident Balanced-default and paste-while-focused **deferred per falsification paths** — not milestone blockers when documented honestly.
 
@@ -41,9 +41,9 @@
 | **G20** | auto | Yield pure logic | ✅ PASS | `yieldFocus.test.ts`, `foregroundTracker.test.ts`, `paste.test.ts` |
 | **G21** | **human** | M-1 offline local paste | ✅ **SIGNED** | 2026-07-09: online + offline (flight mode) paste into Notepad; `transcript-history.json` local entries |
 | **G22** | human | M-2 dev-vocab accuracy per tier | ⏸️ PENDING | Script: `M6_M2_DEV_VOCAB_SCRIPT.md` (to author in launch polish) |
-| **G23** | human | M-5 Mac launch + cloud transcribe | ⏸️ PENDING | Wave 4 + DOM smoke |
-| **G24** | auto | No macos on push/PR | ⏸️ PENDING | Wave 4: `check-workflows.mjs` |
-| **G25** | auto | Windows regression CI | ⏸️ PENDING | Wave 4: `ci.yml` |
+| **G23** | auto+artifact | M-5 macOS CI build + G23-runner bundle verify | ✅ PASS | 2026-07-09: Mac Package workflow green; G23-runner on cloud Mac; human Path B N/A (no Mac HITL required for proof) |
+| **G24** | auto | No macos on push/PR | ✅ PASS | `npm run check:workflows` + `mac-package.yml` dispatch/tags only |
+| **G25** | auto | Windows (+ Ubuntu) regression CI | ✅ PASS | `.github/workflows/ci.yml` on push/PR |
 | **G26** | auto | migrateConfigV4 | ✅ PASS | `config-migration.test.ts` |
 
 **Automated counts at gate record (local):** `npm test` 220/220 · `npm run test:ui` 50/50 · typecheck 0 errors
@@ -99,7 +99,7 @@ Per PRD §3 P3 and Spec Wave 3:
 | Paste while SpeakFlow window is focused | ❌ **NO** | G18 FAIL — workaround: click target first; clipboard fallback |
 | Balanced recommended default | ❌ **NO** | S1 C2 FAIL — **Fast is default** |
 | Resident engine low latency (Balanced+) | ⚠️ **Opt-in honest copy** | Spike failed; downloads available |
-| macOS support | ⏸️ **Pending G23** | Wave 4 — proof not parity |
+| macOS support | ✅ **Beta / proof** | G23 Path A (cloud Mac package + G23-runner) — not full Windows parity; human Path B optional |
 | Cloud fallback on local failure | ❌ **NO** | L5 — hard-block, never silent cloud |
 | GPU acceleration | ❌ **NO** | L14 out of scope |
 
@@ -120,11 +120,12 @@ Per PRD §3 P3 and Spec Wave 3:
 
 | Phase | Owner | Deliverable |
 |-------|-------|-------------|
-| **Wave 4** | Sonnet 4.6 | `ci.yml`, `mac-package.yml`, `check-workflows.mjs`, `mac-launch-smoke.md` |
-| **G23** | DOM + Mac | 1–3 deliberate `workflow_dispatch` runs; Gatekeeper launch smoke |
-| **Launch polish** | Sonnet / Opus | README (M-7), CHANGELOG, `M6_M2_DEV_VOCAB_SCRIPT.md`, TierPicker badge fix |
-| **G22** | DOM | M-2 scripted accuracy compare (optional pre-launch) |
-| **M-7 sign-off** | DOM | Public launch decision (repo private until C-9) |
+| **Wave 4** | — | ✅ Done — `ci.yml`, `mac-package.yml`, `check-workflows.mjs`, `mac-launch-smoke.md` |
+| **G23 Path A** | Actions | ✅ Done — cloud Mac Package + G23-runner (2026-07-09) |
+| **Linux package factory** | Actions | ✅ Done — `linux-package.yml` G28/G31 (e.g. 2026-07-17); desktop G32 still open |
+| **Launch polish** | DOM | README honesty + OSS preflight; CHANGELOG / G22 optional |
+| **G22** | DOM | M-2 scripted accuracy compare (optional) |
+| **Public launch** | DOM | Flip repo visibility after OSS preflight approval |
 
 ---
 
@@ -132,9 +133,13 @@ Per PRD §3 P3 and Spec Wave 3:
 
 ```
 Gate record authored: 2026-07-09
+Amended:              2026-08-02 (OSS preflight — G23/G24/G25 + Linux factory)
 G21 (M-1):  SIGNED — DOM
 G18 (M-3):  FAIL — P3 downgrade applied
 G19 (M-4):  PASS — automated
-Wave 4:      AUTHORIZED — proceed
-Wave 3.1:    NOT AUTHORIZED — per PRD falsification
+G23 Path A: PASS — Mac Package + G23-runner (cloud Mac, 2026-07-09)
+G24/G25:    PASS — check:workflows + ci.yml
+Wave 4:     COMPLETE
+Wave 3.1:   NOT AUTHORIZED — per PRD falsification
+Linux G32:  OPEN — human X11 smoke before supported claim
 ```

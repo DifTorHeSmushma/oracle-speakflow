@@ -4,7 +4,7 @@ Thanks for wanting to contribute. This document explains how.
 
 ## Code of conduct
 
-Be respectful. That is it.
+This project follows [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Be respectful — that is the baseline.
 
 ## Before you start
 

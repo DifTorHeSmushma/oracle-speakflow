@@ -9,13 +9,16 @@ ROOT = Path(__file__).parent
 DIAGRAM = ROOT / "Oracle_SpeakFlow_Workflow_Indigo.excalidraw"
 
 TEXT_BY_ID: dict[str, str] = {
-    "title_sub": "Windows shipped · macOS beta · Linux M7 · MIT open source",
+    "title_sub": "Windows shipped · macOS CI beta · Linux CI package · MIT open source",
     "l1_txt": "Listen  →  VAD  →  Transcribe (cloud / local tier)  →  Dictionary  →  Paste  →  Loop",
     "int_b1": "Groq cloud OR",
     "int_b2": "bundled whisper-cli (Win)",
     "int_b3": "3-tier ladder + dictionary",
+    "cap_b1": "FFmpeg (per-OS mic)",
+    "cap_b2": "Silero VAD v5 ONNX",
+    "cap_b3": "mic gain · pre-roll",
     "del_b1": "yield-focus guard",
-    "del_b2": "Ctrl+V · nut-js",
+    "del_b2": "Ctrl/Cmd+V · nut-js",
     "del_b3": "clipboard fallback",
     "st_t2": "TRANSCRIBING\nGroq / local\ntier picker",
     "st_t3": "CORRECTING\ndictionary\nspoken → written",
@@ -24,11 +27,11 @@ TEXT_BY_ID: dict[str, str] = {
     "ev_d2": "Groq remote path\nwhisper-cli local\nFast · Balanced · Accurate",
     "ev_t3": "paste.ts + dictionary",
     "ev_d3": "HWND guard · yield\nSettings → Dictionary\ndictionary.json",
-    "dev_ttl": "PLATFORMS · M6 · USER TIPS",
+    "dev_ttl": "PLATFORMS · BUILD PROOF · USER TIPS",
     "dev_body": (
         "Windows ✅ shipped — bundled Fast tier, offline local\n"
-        "macOS 🟡 beta — CI .dmg/.zip, cloud transcribe only\n"
-        "Linux ⏳ M7 — CI tests pass, no installer yet\n\n"
+        "macOS 🟡 beta — GitHub cloud Mac Package + G23-runner\n"
+        "Linux 🟡 CI package — deb/AppImage + G28 launch; X11 smoke pending\n\n"
         "Dictionary: tray → Settings → Dictionary → Add\n"
         "Paste: focus target app before speaking"
     ),
