@@ -2,7 +2,7 @@
 
 **Milestone:** M6 — "Public Horizon"
 **Date:** 2026-07-08
-**Author:** Library Architect (Lane 0, Opus-class) — Oracle-SpeakFlow
+**Author:** Oracle SpeakFlow (Intent altitude)
 **Consumer:** Frontier PRD/Spec author = **Fable 5** (`claude-fable-5-thinking-high`) @ Oracle-SpeakFlow repo root
 **Status:** ✅ **Gate B0 APPROVED (2026-07-08)** — DOM signed P1–P4, hypothesis/falsification, M-3/M-4 floors, Parity-then-Proof, macOS→Linux order, C-1…C-10, Fable→Opus→Sonnet routing. Amendments: none. GitHub Pro: YES / later (before first private `macos-latest` wave). **Next: paste §13A to Fable 5.**
 **Altitude:** **Intent only** — problem, bet, falsification, outcomes, constraints, and the research/adversarial work to commission. **No file trees, no APIs, no library/version choices, no implementation steps** — those belong to Fable 5's PRD (intent altitude) and Spec (engineering altitude).

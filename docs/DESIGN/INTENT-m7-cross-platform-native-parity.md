@@ -2,7 +2,7 @@
 
 **Milestone:** M7 — "Three Platforms"
 **Date:** 2026-07-08
-**Author:** Library Architect (Lane 0, Opus-class) — Oracle-SpeakFlow
+**Author:** Oracle SpeakFlow (Intent altitude)
 **Consumer:** Frontier PRD/Spec author = **Fable 5** (`claude-fable-5-thinking-high`) @ Oracle-SpeakFlow repo root
 **Status:** ✅ **Gate B7 APPROVED (2026-07-09)** — DOM: macOS parity first (CI + tester artifact), then Fable 5 STORM for Linux. Repo may stay private during build.
 **Altitude:** Intent only — problem, bet, falsification, outcomes, constraints. No file trees, APIs, or implementation steps.
