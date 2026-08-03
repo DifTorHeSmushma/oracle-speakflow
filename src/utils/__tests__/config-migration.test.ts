@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadConfig, migrateConfigV4, CONFIG_VERSION } from "../config.js";
+import { loadConfig, migrateConfigV4, migrateConfigV5, CONFIG_VERSION, CONFIG_V4 } from "../config.js";
+import { HYBRID_REDEMPTION_FRAMES } from "../../types/voice.js";
 import { isOk } from "../result.js";
 
 const ALL_ENV_KEYS = [
@@ -55,11 +56,12 @@ describe("config migration v4 — G26", () => {
     migrateConfigV4(dir);
 
     const content = readFileSync(join(dir, ".env"), "utf-8");
-    expect(content).toContain(`SPEAKFLOW_CONFIG_VERSION=${CONFIG_VERSION}`);
+    expect(content).toContain(`SPEAKFLOW_CONFIG_VERSION=${CONFIG_V4}`);
   });
 
-  it("CONFIG_VERSION is '4'", () => {
-    expect(CONFIG_VERSION).toBe("4");
+  it("CONFIG_V4 is '4' and CONFIG_VERSION is '5'", () => {
+    expect(CONFIG_V4).toBe("4");
+    expect(CONFIG_VERSION).toBe("5");
   });
 
   // ---------------------------------------------------------------------------
@@ -136,11 +138,11 @@ describe("config migration v4 — G26", () => {
       [
         "GROQ_API_KEY=test-key",
         "SPEAKFLOW_MODEL_TIER=balanced", // user chose balanced
-        `SPEAKFLOW_CONFIG_VERSION=${CONFIG_VERSION}`,
+        `SPEAKFLOW_CONFIG_VERSION=${CONFIG_V4}`,
       ].join("\n"),
       "utf-8"
     );
-    process.env["SPEAKFLOW_CONFIG_VERSION"] = CONFIG_VERSION;
+    process.env["SPEAKFLOW_CONFIG_VERSION"] = CONFIG_V4;
     process.env["SPEAKFLOW_MODEL_TIER"] = "balanced";
 
     migrateConfigV4(dir);
@@ -182,5 +184,77 @@ describe("config migration v4 — G26", () => {
     expect(isOk(result)).toBe(true);
     if (!isOk(result)) return;
     expect(result.value.modelTier).toBe("accurate");
+  });
+});
+
+describe("config migration v5 — issue #6 hybrid redemption floor", () => {
+  let dir: string;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of ALL_ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    dir = mkdtempSync(join(tmpdir(), "speakflow-cfg-v5-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    for (const key of ALL_ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  it("migrateConfigV5 bumps redemptionFrames 40 → 79", () => {
+    const staleVad = {
+      positiveSpeechThreshold: 0.42,
+      negativeSpeechThreshold: 0.28,
+      minSpeechFrames: 6,
+      redemptionFrames: 40,
+      preSpeechPadFrames: 20,
+    };
+    writeFileSync(
+      join(dir, ".env"),
+      [
+        "GROQ_API_KEY=test-key",
+        `SPEAKFLOW_VAD=${JSON.stringify(staleVad)}`,
+        `SPEAKFLOW_CONFIG_VERSION=${CONFIG_V4}`,
+      ].join("\n"),
+      "utf-8"
+    );
+    process.env["SPEAKFLOW_CONFIG_VERSION"] = CONFIG_V4;
+    process.env["SPEAKFLOW_VAD"] = JSON.stringify(staleVad);
+
+    migrateConfigV5(dir);
+
+    const content = readFileSync(join(dir, ".env"), "utf-8");
+    expect(content).toContain(`SPEAKFLOW_CONFIG_VERSION=${CONFIG_VERSION}`);
+    expect(content).toContain(`"redemptionFrames":${HYBRID_REDEMPTION_FRAMES}`);
+  });
+
+  it("loadConfig clamps stale redemptionFrames=40 even without migration stamp", () => {
+    const staleVad = {
+      positiveSpeechThreshold: 0.42,
+      negativeSpeechThreshold: 0.28,
+      minSpeechFrames: 6,
+      redemptionFrames: 40,
+      preSpeechPadFrames: 20,
+    };
+    writeFileSync(
+      join(dir, ".env"),
+      [
+        "GROQ_API_KEY=test-key",
+        `SPEAKFLOW_VAD=${JSON.stringify(staleVad)}`,
+        `SPEAKFLOW_CONFIG_VERSION=${CONFIG_VERSION}`,
+      ].join("\n"),
+      "utf-8"
+    );
+
+    const result = loadConfig(dir);
+    expect(isOk(result)).toBe(true);
+    if (!isOk(result)) return;
+    expect(result.value.vad.redemptionFrames).toBe(HYBRID_REDEMPTION_FRAMES);
   });
 });

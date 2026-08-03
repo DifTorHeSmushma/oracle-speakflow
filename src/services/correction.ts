@@ -58,9 +58,28 @@ const DEV_TERMS: ReadonlyMap<string, string> = new Map([
   ["vue", "Vue"],
   ["tailwind", "Tailwind"],
   ["prettier", "Prettier"],
+  ["cursor", "Cursor"],
+  ["speakflow", "SpeakFlow"],
 ]);
 
-// Precompiled regex for each term — built once at module load time
+// Issue #12 — product-name phrase remaps (ASR mush). Longer phrases first.
+const PRODUCT_PHRASES: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
+  { pattern: /\bspeed\s*flows?\b/gi, replacement: "SpeakFlow" },
+  { pattern: /\bspeak\s*flows?\b/gi, replacement: "SpeakFlow" },
+  { pattern: /\bspeech\s*flows?\b/gi, replacement: "SpeakFlow" },
+  // Dom #13: Whisper often hears "SpeakFlow" as "speak through".
+  { pattern: /\bspeak\s*through\b/gi, replacement: "SpeakFlow" },
+  { pattern: /\bspeakflow\b/gi, replacement: "SpeakFlow" },
+];
+
+/** Whisper often invents a short filler before the real dictation (Dom #12). */
+const FILLER_PREFIXES: ReadonlyArray<RegExp> = [
+  /^tested it here[,.]?\s+/i,
+  /^thanks for watching[.!]?\s+/i,
+  /^thank you for watching[.!]?\s+/i,
+  /^thanks for listening[.!]?\s+/i,
+];
+
 const DEV_TERM_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = Array.from(
   DEV_TERMS.entries()
 ).map(([term, replacement]) => ({
@@ -83,8 +102,24 @@ function applyDevTerms(text: string): string {
   return result;
 }
 
+function applyProductLexicon(text: string): string {
+  let result = text;
+  for (const { pattern, replacement } of PRODUCT_PHRASES) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+function stripFillerPrefixes(text: string): string {
+  let result = text;
+  for (const re of FILLER_PREFIXES) {
+    result = result.replace(re, "");
+  }
+  return result.trim();
+}
+
 /**
- * Deterministic correction pipeline (steps 1–2 + step 4/dictionary).
+ * Deterministic correction pipeline (steps 1–2 + product lexicon + step 4/dictionary).
  * Step 3 (LLM) is off by default and deferred.
  * Dictionary runs LAST and is authoritative — Spec §6.2 / Invariant.
  */
@@ -95,19 +130,15 @@ export const correct = async (
 ): Promise<{ text: string; ms: number }> => {
   const start = performance.now();
 
-  // Step 1: whitespace/punctuation normalization
   let text = normalizeWhitespace(raw);
-
-  // Step 2: dev-term casing
+  text = stripFillerPrefixes(text);
   text = applyDevTerms(text);
+  text = applyProductLexicon(text);
 
-  // Step 3: LLM opt-in (off by default — skipped in Wave 1.1)
   if (cfg.llmEnabled) {
-    // Placeholder: LLM pass deferred to post-Wave 3 opt-in path
     process.stderr.write("[correction] LLM pass requested but not yet implemented\n");
   }
 
-  // Step 4: Personal Dictionary — authoritative, runs LAST
   const { text: dictText } = applyDictionary(text, dict);
   text = dictText;
 

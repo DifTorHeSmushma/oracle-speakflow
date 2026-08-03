@@ -27,7 +27,12 @@ vi.mock("../src/utils/binaryPath.js", () => ({
 // Now import the module under test (after mocks are registered)
 import { createVad, FRAME_SAMPLES } from "../src/services/vad.js";
 import type { CaptureSession } from "../src/services/capture.js";
-import type { VadConfig } from "../src/types/voice.js";
+import {
+  DEFAULT_VAD_CONFIG,
+  HYBRID_REDEMPTION_FRAMES,
+  clampVadForHybrid,
+  type VadConfig,
+} from "../src/types/voice.js";
 import type { MuteState } from "../src/services/mute.js";
 
 // ---------------------------------------------------------------------------
@@ -89,6 +94,9 @@ function makeCaptureMock() {
       totalFrames,
       bytesPerSecWindow: 32000,
     })),
+    getSessionFrameCount: vi.fn(() => 0),
+    getSessionPcmDurationSec: vi.fn(() => 0),
+    peekSessionWav: vi.fn(() => null),
     stop: vi.fn().mockResolvedValue(undefined),
   };
 
@@ -278,6 +286,136 @@ describe("vad service", () => {
 
     expect(wavBuffers.length).toBeGreaterThan(0);
     expect(wavBuffers[0]).toBeInstanceOf(Buffer);
+  });
+
+  it("speechEnd does not fire before redemptionFrames silence frames", async () => {
+    let callCount = 0;
+    const mockRun = vi.fn().mockImplementation(() => {
+      callCount++;
+      const prob = callCount <= DEFAULT_CFG.minSpeechFrames ? 0.9 : 0.1;
+      return Promise.resolve(makeRunOutput(prob));
+    });
+    mockCreateSession.mockResolvedValue({ run: mockRun });
+
+    const { session, pushFrame, armVad } = makeCaptureMock();
+    const result = await createVad(DEFAULT_CFG, session, unmutedState);
+    if (!result.ok) return;
+
+    const onSpeechEnd = vi.fn();
+    result.value.onSpeechEnd(onSpeechEnd);
+    armVad(result.value);
+
+    for (let i = 0; i < DEFAULT_CFG.minSpeechFrames; i++) pushFrame();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // One fewer than redemption — must not finalize
+    for (let i = 0; i < DEFAULT_CFG.redemptionFrames - 1; i++) pushFrame();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(onSpeechEnd).not.toHaveBeenCalled();
+
+    pushFrame();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(onSpeechEnd).toHaveBeenCalledOnce();
+  });
+
+  it("elevated-RMS mid-pause does not count as silence (no early speechEnd)", async () => {
+    // After speech start, Silero goes low but frames have high energy (breath/noise).
+    // Those must NOT advance speechNegativeCount toward redemption.
+    const cfg: VadConfig = { ...DEFAULT_CFG, redemptionFrames: 3 };
+    let callCount = 0;
+    const mockRun = vi.fn().mockImplementation(() => {
+      callCount++;
+      const prob = callCount <= cfg.minSpeechFrames ? 0.9 : 0.05;
+      return Promise.resolve(makeRunOutput(prob));
+    });
+    mockCreateSession.mockResolvedValue({ run: mockRun });
+
+    const { session, pushFrame, armVad } = makeCaptureMock();
+    const result = await createVad(cfg, session, unmutedState);
+    if (!result.ok) return;
+
+    const onSpeechEnd = vi.fn();
+    result.value.onSpeechEnd(onSpeechEnd);
+    armVad(result.value);
+
+    for (let i = 0; i < cfg.minSpeechFrames; i++) pushFrame();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // High-amplitude frames + low Silero → speech (RMS path) or at least not silence
+    const loud = new Float32Array(FRAME_SAMPLES);
+    loud.fill(0.2);
+    for (let i = 0; i < cfg.redemptionFrames + 5; i++) pushFrame(loud);
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(onSpeechEnd).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Gate G-D3 — pause floor at the SHIPPED defaults (PRD #9 M3 / wrong condition 3).
+  // These fixtures run DEFAULT_VAD_CONFIG rather than the fast test config, so a
+  // regression in the shipped redemption budget fails here instead of in Dom's Notepad.
+  // ---------------------------------------------------------------------------
+
+  /** 32 ms per frame — 2.0 s of mid-thought pause must never finalize. */
+  const FRAMES_2000_MS = 63;
+
+  it("does not finalize on a 2.0 s mid-pause at the shipped redemption default", async () => {
+    let callCount = 0;
+    const mockRun = vi.fn().mockImplementation(() => {
+      callCount++;
+      const prob = callCount <= DEFAULT_VAD_CONFIG.minSpeechFrames ? 0.9 : 0.02;
+      return Promise.resolve(makeRunOutput(prob));
+    });
+    mockCreateSession.mockResolvedValue({ run: mockRun });
+
+    const { session, pushFrame, armVad } = makeCaptureMock();
+    const result = await createVad(DEFAULT_VAD_CONFIG, session, unmutedState);
+    if (!result.ok) return;
+
+    const onSpeechEnd = vi.fn();
+    result.value.onSpeechEnd(onSpeechEnd);
+    armVad(result.value);
+
+    for (let i = 0; i < DEFAULT_VAD_CONFIG.minSpeechFrames; i++) pushFrame();
+    await new Promise((r) => setTimeout(r, 20));
+
+    for (let i = 0; i < FRAMES_2000_MS; i++) pushFrame();
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(onSpeechEnd).not.toHaveBeenCalled();
+    expect(DEFAULT_VAD_CONFIG.redemptionFrames).toBeGreaterThan(FRAMES_2000_MS);
+  });
+
+  it("soft-finalizes once the shipped redemption budget (~2.5 s) elapses", async () => {
+    let callCount = 0;
+    const mockRun = vi.fn().mockImplementation(() => {
+      callCount++;
+      const prob = callCount <= DEFAULT_VAD_CONFIG.minSpeechFrames ? 0.9 : 0.02;
+      return Promise.resolve(makeRunOutput(prob));
+    });
+    mockCreateSession.mockResolvedValue({ run: mockRun });
+
+    const { session, pushFrame, armVad } = makeCaptureMock();
+    const result = await createVad(DEFAULT_VAD_CONFIG, session, unmutedState);
+    if (!result.ok) return;
+
+    const onSpeechEnd = vi.fn();
+    result.value.onSpeechEnd(onSpeechEnd);
+    armVad(result.value);
+
+    for (let i = 0; i < DEFAULT_VAD_CONFIG.minSpeechFrames; i++) pushFrame();
+    await new Promise((r) => setTimeout(r, 20));
+
+    for (let i = 0; i < HYBRID_REDEMPTION_FRAMES; i++) pushFrame();
+    await new Promise((r) => setTimeout(r, 80));
+
+    expect(onSpeechEnd).toHaveBeenCalledOnce();
+  });
+
+  it("clamps a stale sub-floor redemption config back up to the hybrid floor", () => {
+    const stale = { ...DEFAULT_VAD_CONFIG, redemptionFrames: 40 };
+    expect(clampVadForHybrid(stale).redemptionFrames).toBe(HYBRID_REDEMPTION_FRAMES);
+    expect(clampVadForHybrid(DEFAULT_VAD_CONFIG).redemptionFrames).toBe(HYBRID_REDEMPTION_FRAMES);
   });
 
   // ---------------------------------------------------------------------------

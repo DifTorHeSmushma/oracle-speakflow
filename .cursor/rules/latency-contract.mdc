@@ -1,0 +1,24 @@
+---
+description: SpeakFlow last-word latency — no drift on #13
+globs: src/electron-main.ts,src/services/speculativeReuse.ts,src/services/transcription.ts,src/services/vad.ts
+alwaysApply: false
+---
+
+# LATENCY_CONTRACT guardrail
+
+Read `docs/DESIGN/LATENCY_CONTRACT.md` before changing settle/speculative paths.
+
+## Allowed
+- Mid-speech / silence-hint Groq finalize kicks
+- Reuse in-flight speculative at speech_end when frames within slack
+- Logging `speculativeReuse`, `settleWav`, `pasteCompleteMs`
+
+## Forbidden in a latency slice
+- Lower `redemptionFrames` below 79
+- Lexicon / FINALIZE_PROMPT / hallucination detector edits “for speed”
+- Delivery / Cursor restore redesign
+- Claiming DONE from `SPEAKFLOW_SMOKE_WAV` alone
+- Paid streaming vendor as required dependency
+
+## Proof
+`npm run check:latency-overlap` must stay green. Dom live Cursor row is optional confirmation, not a substitute for the gate.

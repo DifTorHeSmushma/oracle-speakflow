@@ -4,29 +4,9 @@
   "description": "Hands-free speech-to-text that pastes into whatever app has focus — for anyone who types all day (writers, teachers, admins, developers).",
   "type": "module",
   "main": "dist/electron-main.js",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/DifTorHeSmushma/oracle-speakflow.git"
-  },
-  "homepage": "https://github.com/DifTorHeSmushma/oracle-speakflow#readme",
-  "bugs": {
-    "url": "https://github.com/DifTorHeSmushma/oracle-speakflow/issues"
-  },
-  "license": "MIT",
-  "author": "Domenic Young",
-  "keywords": [
-    "speech-to-text",
-    "dictation",
-    "whisper",
-    "groq",
-    "electron",
-    "accessibility",
-    "voice-to-text",
-    "hands-free"
-  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node -e \"require('fs').copyFileSync('src/utils/win32-hot-server.ps1','dist/utils/win32-hot-server.ps1')\"",
     "start": "node dist/index.js",
     "build:ui": "vite build",
     "start:app": "npm run build && npm run build:ui && electron dist/electron-main.js",
@@ -34,6 +14,11 @@
     "check:manifest": "node scripts/check-manifest.mjs",
     "check:focus": "node scripts/check-focus-grep.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
+    "check:delivery": "tsx scripts/gate-hwnd-delivery.ts",
+    "check:delivery:electron": "tsx scripts/gate-electron-delivery.ts",
+    "check:wer": "tsx scripts/gate-wer-fixtures.ts",
+    "check:latency-overlap": "node scripts/check-latency-overlap.mjs",
+    "validate:gates": "node scripts/gate-report.mjs",
     "test": "vitest run --config vitest.config.ts",
     "test:ui": "vitest run --config vitest.ui.config.ts",
     "test:watch": "vitest",
@@ -46,7 +31,8 @@
     "groq-sdk": "^0.7.0",
     "node-record-lpcm16": "^1.0.1",
     "onnxruntime-node": "^1.20.1",
-    "uiohook-napi": "^1.5.5"
+    "uiohook-napi": "^1.5.5",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
@@ -55,6 +41,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/svelte": "^5.3.1",
     "@types/node": "^20.0.0",
+    "@types/ws": "^8.18.1",
     "clsx": "^2.1.1",
     "electron": "^41.3.0",
     "electron-builder": "^26.8.1",
@@ -115,8 +102,18 @@
     },
     "linux": {
       "target": [
-        { "target": "deb", "arch": ["x64"] },
-        { "target": "AppImage", "arch": ["x64"] }
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "category": "Utility",
       "maintainer": "Domenic Young <domenic.369@gmail.com>",
@@ -125,16 +122,28 @@
     },
     "deb": {
       "depends": [
-        "libgtk-3-0", "libnotify4", "libnss3", "libxss1", "libxtst6",
-        "xdg-utils", "libatspi2.0-0", "libuuid1", "libsecret-1-0",
-        "ffmpeg", "x11-utils"
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "ffmpeg",
+        "x11-utils"
       ]
     },
     "mac": {
       "identity": null,
       "target": [
-        { "target": "dmg" },
-        { "target": "zip" }
+        {
+          "target": "dmg"
+        },
+        {
+          "target": "zip"
+        }
       ],
       "category": "public.app-category.productivity",
       "artifactName": "${productName}-${version}-${arch}.${ext}",
@@ -145,5 +154,25 @@
         "NSMicrophoneUsageDescription": "Oracle SpeakFlow needs the microphone to transcribe your speech."
       }
     }
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DifTorHeSmushma/oracle-speakflow.git"
+  },
+  "homepage": "https://github.com/DifTorHeSmushma/oracle-speakflow#readme",
+  "bugs": {
+    "url": "https://github.com/DifTorHeSmushma/oracle-speakflow/issues"
+  },
+  "license": "MIT",
+  "author": "Domenic Young",
+  "keywords": [
+    "speech-to-text",
+    "dictation",
+    "whisper",
+    "groq",
+    "electron",
+    "accessibility",
+    "voice-to-text",
+    "hands-free"
+  ]
 }

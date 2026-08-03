@@ -70,6 +70,15 @@ export type CaptureSession = {
   takeSegment: (padFrames: number) => Buffer;
   /** Same segment as takeSegment plus raw WAV + clip/truncation meta (Phase 0). */
   takeSegmentDetailed: (padFrames: number) => CaptureSegmentDetailed;
+  /** Speech-session frame count since markSpeechStart (0 if idle). */
+  getSessionFrameCount: () => number;
+  /** Session speech duration in seconds (0 if idle). */
+  getSessionPcmDurationSec: () => number;
+  /**
+   * Build WAV from session speech frames [start, end) without clearing the session.
+   * Indices are 0-based within the session speech buffer (excludes leading pad).
+   */
+  peekSessionWav: (startFrame: number, endFrame: number) => Buffer | null;
   getHealth: () => CaptureHealth;
   stop: () => Promise<void>;
 };
@@ -137,6 +146,14 @@ export function buildWavBuffer(s16leData: Buffer): Buffer {
   return Buffer.concat([header, s16leData]);
 }
 
+/** Keep the trailing `maxSec` of PCM (issue #6 — oversized session WAVs time out on Groq). */
+export function trimWavToMaxSec(wav: Buffer, maxSec: number): Buffer {
+  if (wav.length <= 44 || maxSec <= 0) return wav;
+  const maxPcmBytes = Math.floor(maxSec * SAMPLE_RATE) * 2;
+  if (wav.length - 44 <= maxPcmBytes) return wav;
+  return buildWavBuffer(wav.subarray(wav.length - maxPcmBytes));
+}
+
 function resolveFFmpeg(): string {
   const bundled = getBinaryPath(resolveBundledBinaryName("ffmpeg"));
   if (existsSync(bundled)) return bundled;
@@ -150,10 +167,12 @@ function resolveAudioInput(ffmpegPath: string): string {
   return resolveDshowAudioInput(ffmpegPath);
 }
 
+/** Default 2 — legacy default 20 clipped ASR (Gate Alpha mush). Cap at 8. */
 export function resolveMicGain(): number {
   const raw = process.env["SPEAKFLOW_MIC_GAIN"]?.trim();
-  const gain = raw ? Number(raw) : 20;
-  return Number.isFinite(gain) && gain > 0 ? gain : 20;
+  const gain = raw ? Number(raw) : 2;
+  if (!Number.isFinite(gain) || gain <= 0) return 2;
+  return Math.min(gain, 8);
 }
 
 export function applyGainToS16le(s16le: Buffer, gain: number): Buffer {
@@ -193,6 +212,9 @@ function isFfmpegRealtimeDropLine(line: string): boolean {
 // ---------------------------------------------------------------------------
 // startContinuousCapture
 // ---------------------------------------------------------------------------
+/** Max leading-pad frames snapshotted at speech start (covers DEFAULT pad 20 + headroom). */
+const SESSION_PAD_SNAPSHOT_MAX = 64;
+
 export const startContinuousCapture = (): Result<CaptureSession, RecorderError> => {
   const ring = new FrameRingBuffer(RING_BUFFER_FRAMES);
   let partial = Buffer.alloc(0);
@@ -203,6 +225,10 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
   let softOnsetFrame: number | null = null;
   let lastSoftOnsetAtStart: number | null = null;
   let lastBackdateUsed = 0;
+  /** Growable speech PCM (s16le frames) for the active utterance — not limited by ring. */
+  let sessionSpeech: Buffer[] | null = null;
+  /** Leading pad frames captured at markSpeechStart (before speech onset). */
+  let sessionLeadingPad: Buffer[] = [];
   const frameListeners: Array<(f: PcmFrame) => void> = [];
   const micGain = resolveMicGain();
   const captureDebug = process.env["SPEAKFLOW_VAD_DEBUG"] === "1" || isCaptureDiagEnabled();
@@ -216,6 +242,12 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
   let windowBytes = 0;
   let windowStartMs = ffmpegSpawnMs;
   let bytesPerSecWindow: number | null = null;
+
+  const clearSession = (): void => {
+    sessionSpeech = null;
+    sessionLeadingPad = [];
+    speechStartFrame = null;
+  };
 
   try {
     const ffmpegPath = resolveFFmpeg();
@@ -251,8 +283,12 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
           const frameBytes = buf.slice(0, FRAME_BYTES);
           buf = buf.slice(FRAME_BYTES);
 
-          ring.push(Buffer.from(frameBytes));
+          const frameCopy = Buffer.from(frameBytes);
+          ring.push(frameCopy);
           totalFrames++;
+          if (sessionSpeech !== null) {
+            sessionSpeech.push(frameCopy);
+          }
 
           const { float32, rms, peak } = frameStats(frameBytes, micGain);
           if (captureDebug) {
@@ -267,7 +303,7 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
               debugRmsMax = 0;
             }
           }
-          for (const cb of frameListeners) cb(float32);
+          for (const listener of frameListeners) listener(float32);
         }
         partial = buf;
         cb();
@@ -310,7 +346,7 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
     stream.pipe(writable);
 
     const takeDetailed = (padFrames: number): CaptureSegmentDetailed => {
-      if (speechStartFrame === null) {
+      if (speechStartFrame === null || sessionSpeech === null) {
         const empty = Buffer.alloc(0);
         const emptyMeta: CaptureSegmentMeta = {
           speechStartFrame: -1,
@@ -342,10 +378,11 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
       }
 
       const start = speechStartFrame;
-      const speechFrameCount = totalFrames - start;
-      const totalToTake = padFrames + speechFrameCount;
-      const truncated = totalToTake > ring.count;
-      const frames = ring.getLast(totalToTake);
+      const speechFrameCount = sessionSpeech.length;
+      const pad = sessionLeadingPad.slice(Math.max(0, sessionLeadingPad.length - padFrames));
+      const frames = [...pad, ...sessionSpeech];
+      // Session buffer holds the full utterance — never ring-truncated for ≤60s+ speech.
+      const truncated = false;
       const rawPcm = Buffer.concat(frames);
       const gainedPcm = applyGainToS16le(rawPcm, micGain);
       const rawClip = countClipSamplesS16le(rawPcm, 1);
@@ -355,7 +392,7 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
         speechStartFrame: start,
         speechEndFrame: totalFrames,
         speechFrameCount,
-        padFrames,
+        padFrames: pad.length,
         takeCount: frames.length,
         ringCount: ring.count,
         ringCapacity: ring.capacity,
@@ -371,7 +408,7 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
         gainedClipFrac: sampleCount > 0 ? gainedClip.clipSamples / sampleCount : 0,
         sampleRate: SAMPLE_RATE,
       };
-      speechStartFrame = null;
+      clearSession();
       return {
         gainedWav: buildWavBuffer(gainedPcm),
         rawWav: buildWavBuffer(rawPcm),
@@ -406,6 +443,18 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
         lastBackdateUsed = back;
         speechStartFrame = now - back;
         softOnsetFrame = null;
+
+        // Seed session from ring: leading pad + speech-so-far through live head
+        // (issue #6 ≥60 s ceiling). Use totalFrames - start, not `back` alone —
+        // lagged VAD may stamp start in the past while the ring has advanced.
+        const speechSoFar = Math.min(
+          Math.max(0, totalFrames - (speechStartFrame ?? totalFrames)),
+          ring.count
+        );
+        const padWant = Math.min(SESSION_PAD_SNAPSHOT_MAX, Math.max(0, ring.count - speechSoFar));
+        const chunk = ring.getLast(speechSoFar + padWant);
+        sessionLeadingPad = chunk.slice(0, Math.max(0, chunk.length - speechSoFar));
+        sessionSpeech = chunk.slice(Math.max(0, chunk.length - speechSoFar));
       },
 
       takeSegment(padFrames) {
@@ -414,6 +463,25 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
 
       takeSegmentDetailed(padFrames) {
         return takeDetailed(padFrames);
+      },
+
+      getSessionFrameCount() {
+        return sessionSpeech?.length ?? 0;
+      },
+
+      getSessionPcmDurationSec() {
+        const n = sessionSpeech?.length ?? 0;
+        return (n * FRAME_SAMPLES) / SAMPLE_RATE;
+      },
+
+      peekSessionWav(startFrame, endFrame) {
+        if (sessionSpeech === null) return null;
+        const start = Math.max(0, Math.min(startFrame, sessionSpeech.length));
+        const end = Math.max(start, Math.min(endFrame, sessionSpeech.length));
+        if (end <= start) return null;
+        const rawPcm = Buffer.concat(sessionSpeech.slice(start, end));
+        const gainedPcm = applyGainToS16le(rawPcm, micGain);
+        return buildWavBuffer(gainedPcm);
       },
 
       getHealth() {
@@ -433,6 +501,7 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
         if (stopped) return Promise.resolve();
         stopped = true;
         intentionalStop = true;
+        clearSession();
         try { proc.kill(); } catch { /* best-effort */ }
         stream.unpipe(writable);
         writable.end();

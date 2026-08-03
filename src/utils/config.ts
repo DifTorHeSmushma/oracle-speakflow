@@ -4,8 +4,18 @@ import { Result, Ok, Err } from "./result.js";
 import { DEFAULT_HOTKEY, HOTKEY_CONFIG_VERSION } from "./defaultHotkey.js";
 import type { TranscriptionMode, ModelTier } from "../types/ipc.js";
 import type { VoiceMode, VadConfig, CorrectionConfig } from "../types/voice.js";
-import { DEFAULT_VAD_CONFIG, DEFAULT_CORRECTION_CONFIG } from "../types/voice.js";
-export { DEFAULT_VAD_CONFIG, DEFAULT_CORRECTION_CONFIG } from "../types/voice.js";
+import {
+  DEFAULT_VAD_CONFIG,
+  DEFAULT_CORRECTION_CONFIG,
+  HYBRID_REDEMPTION_FRAMES,
+  clampVadForHybrid,
+} from "../types/voice.js";
+export {
+  DEFAULT_VAD_CONFIG,
+  DEFAULT_CORRECTION_CONFIG,
+  HYBRID_REDEMPTION_FRAMES,
+  clampVadForHybrid,
+} from "../types/voice.js";
 
 export type ConfigSave = Partial<Config> & { hotkeyConfigVersion?: string; firstRunExplainerDismissed?: boolean };
 
@@ -28,19 +38,14 @@ export type Config = {
 export type ConfigError = { kind: "missingApiKey" } | { kind: "writeFailed"; message: string };
 
 export const CONFIG_V3 = "3";
-export const CONFIG_VERSION = "4";
+export const CONFIG_V4 = "4";
+export const CONFIG_VERSION = "5";
 
 const atLeast = (current: string | undefined, min: string): boolean =>
   current !== undefined && parseInt(current, 10) >= parseInt(min, 10);
 
 export const DEFAULT_CALL_APP_ALLOWLIST = ["Zoom.exe", "Teams.exe", "ms-teams.exe", "Discord.exe"];
 
-/**
- * First-run language when SPEAKFLOW_LANGUAGE is unset.
- * English stays the default for English UI locales (unchanged for existing users who saved `en`).
- * Thai OS / UI locales default to `th` so Thai friends can open and dictate immediately.
- * Users can always switch Language in Settings → Engine (Thai ↔ English ↔ Auto).
- */
 export const resolveDefaultLanguage = (
   env: NodeJS.ProcessEnv = process.env,
   intlLocale?: string
@@ -138,12 +143,42 @@ export const migrateConfigV3 = (cwd: string): void => {
  * Additive and non-destructive — never removes existing keys. G26.
  */
 export const migrateConfigV4 = (cwd: string): void => {
-  if (atLeast(process.env["SPEAKFLOW_CONFIG_VERSION"], CONFIG_VERSION)) return;
+  if (atLeast(process.env["SPEAKFLOW_CONFIG_VERSION"], CONFIG_V4)) return;
 
   const updates: ConfigSave & { configVersion?: string } = {};
 
   if (!process.env["SPEAKFLOW_MODEL_TIER"]) {
     updates.modelTier = "fast";
+  }
+
+  updates.configVersion = CONFIG_V4;
+  saveConfig(cwd, updates);
+};
+
+/**
+ * Issue #6: bump redemptionFrames to hybrid floor (≥79 / ~2.53 s).
+ * Stale SPEAKFLOW_VAD with redemptionFrames=40 caused Gate A false finalize on ~1.3 s pauses.
+ */
+export const migrateConfigV5 = (cwd: string): void => {
+  if (atLeast(process.env["SPEAKFLOW_CONFIG_VERSION"], CONFIG_VERSION)) return;
+
+  const updates: ConfigSave & { configVersion?: string } = {};
+  const vadRaw = process.env["SPEAKFLOW_VAD"]?.trim();
+  if (vadRaw) {
+    try {
+      const parsed = JSON.parse(vadRaw) as VadConfig;
+      const clamped = clampVadForHybrid(parsed);
+      if (clamped.redemptionFrames !== parsed.redemptionFrames) {
+        updates.vad = clamped;
+        process.stderr.write(
+          `[config] migrate v5: redemptionFrames ${parsed.redemptionFrames} → ${clamped.redemptionFrames}\n`
+        );
+      }
+    } catch {
+      updates.vad = DEFAULT_VAD_CONFIG;
+    }
+  } else {
+    updates.vad = DEFAULT_VAD_CONFIG;
   }
 
   updates.configVersion = CONFIG_VERSION;
@@ -183,7 +218,7 @@ export const saveConfig = (cwd: string, partial: ConfigSave & { configVersion?: 
     updates["SPEAKFLOW_VOICE_MODE"] = partial.voiceMode;
   }
   if (partial.vad !== undefined) {
-    updates["SPEAKFLOW_VAD"] = JSON.stringify(partial.vad);
+    updates["SPEAKFLOW_VAD"] = JSON.stringify(clampVadForHybrid(partial.vad));
   }
   if (partial.correction !== undefined) {
     updates["SPEAKFLOW_CORRECTION"] = JSON.stringify(partial.correction);
@@ -246,16 +281,15 @@ export const loadConfig = (
   migrateHotkeyConfigV2(cwd);
   migrateConfigV3(cwd);
   migrateConfigV4(cwd);
+  migrateConfigV5(cwd);
 
   const groqApiKey = process.env["GROQ_API_KEY"]?.trim();
   if (!groqApiKey) return Err({ kind: "missingApiKey" });
 
   // Persist user-overridden values via saveConfig; defaults apply on first run.
   const model = process.env["SPEAKFLOW_MODEL"]?.trim() ?? "whisper-large-v3-turbo";
-  // Explicit SPEAKFLOW_LANGUAGE (including "en") always wins — existing English installs unchanged.
   const language =
     process.env["SPEAKFLOW_LANGUAGE"]?.trim() || resolveDefaultLanguage(process.env);
-
   const hotkeyRaw = process.env["SPEAKFLOW_HOTKEY"]?.trim();
   const hotkey: Config["hotkey"] = hotkeyRaw
     ? (JSON.parse(hotkeyRaw) as Config["hotkey"])
@@ -270,7 +304,9 @@ export const loadConfig = (
     voiceModeRaw === "ptt" ? "ptt" : "handsFree";
 
   const vadRaw = process.env["SPEAKFLOW_VAD"]?.trim();
-  const vad: VadConfig = vadRaw ? (JSON.parse(vadRaw) as VadConfig) : DEFAULT_VAD_CONFIG;
+  const vad: VadConfig = clampVadForHybrid(
+    vadRaw ? (JSON.parse(vadRaw) as VadConfig) : DEFAULT_VAD_CONFIG
+  );
 
   const correctionRaw = process.env["SPEAKFLOW_CORRECTION"]?.trim();
   const correction: CorrectionConfig = correctionRaw
