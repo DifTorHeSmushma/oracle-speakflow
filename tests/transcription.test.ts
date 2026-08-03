@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { transcribe } from "../src/services/transcription.js";
+import {
+  transcribe,
+  transcribeFinalize,
+  CLOUD_FINALIZE_TIMEOUT_MS,
+  FINALIZE_MODEL,
+} from "../src/services/transcription.js";
 
 // vi.hoisted() runs before vi.mock() hoisting — gives us shared references
 // that are accessible in both the factory and the test body.
@@ -139,7 +144,7 @@ describe("transcription service", () => {
 
   // ---- Network / transient errors -----------------------------------------
 
-  it("returns Err(networkTimeout) on ETIMEDOUT and does not retry under cloud hard ceiling", async () => {
+  it("returns Err(networkTimeout) on ETIMEDOUT after one retry", async () => {
     const networkErr = Object.assign(new Error("connect failed"), { code: "ETIMEDOUT" });
     mockCreate.mockRejectedValue(networkErr);
 
@@ -147,17 +152,73 @@ describe("transcription service", () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.kind).toBe("networkTimeout");
-    // CLOUD_RETRY_ATTEMPTS = 0 → single attempt (fail fast; no 3×60s hangs)
-    expect(mockCreate).toHaveBeenCalledTimes(1);
+    // CLOUD_RETRY_ATTEMPTS = 1 → initial + one retry
+    expect(mockCreate).toHaveBeenCalledTimes(2);
   });
 
-  it("constructs Groq client with 10s cloud timeout", async () => {
+  it("constructs Groq client with 25s cloud timeout", async () => {
     const Groq = (await import("groq-sdk")).default as unknown as ReturnType<typeof vi.fn>;
     mockCreate.mockResolvedValueOnce("ok");
     await transcribe(apiKey, dummyBuffer, "whisper-large-v3-turbo", "en");
     expect(Groq).toHaveBeenCalledWith(
-      expect.objectContaining({ apiKey, timeout: 10_000 })
+      expect.objectContaining({ apiKey, timeout: 25_000 })
     );
+  });
+
+  it("finalize path uses turbo settle model, short timeout, and vocabulary prompt (#12/#13)", async () => {
+    const Groq = (await import("groq-sdk")).default as unknown as ReturnType<typeof vi.fn>;
+    mockCreate.mockResolvedValueOnce("SpeakFlow test");
+    await transcribeFinalize(apiKey, dummyBuffer, "en");
+    expect(Groq).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey, timeout: CLOUD_FINALIZE_TIMEOUT_MS })
+    );
+    expect(FINALIZE_MODEL).toBe("whisper-large-v3-turbo");
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: FINALIZE_MODEL,
+        temperature: 0,
+        prompt: expect.stringContaining("SpeakFlow"),
+      })
+    );
+  });
+
+  it("finalize does not retry on timeout (#12 latency floor)", async () => {
+    const networkErr = Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
+    mockCreate.mockRejectedValue(networkErr);
+    const result = await transcribeFinalize(apiKey, dummyBuffer, "en");
+    expect(result.ok).toBe(false);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  // ---- Gate G-D4: aborted requests are typed as timeouts, not opaque API errors ----
+
+  it("maps an aborted Groq request (APIError status 0) to networkTimeout", async () => {
+    // The SDK surfaces its own timeout as APIError{status: 0, "Request timed out."}.
+    // Reporting that as apiError(0) hid every real timeout behind an unactionable message.
+    mockCreate.mockRejectedValue(new MockAPIError(0, "Request timed out."));
+
+    const result = await transcribe(apiKey, dummyBuffer, "whisper-large-v3-turbo", "en");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("networkTimeout");
+  });
+
+  it("maps a bare timeout Error with no error code to networkTimeout", async () => {
+    mockCreate.mockRejectedValue(new Error("Request timed out."));
+
+    const result = await transcribe(apiKey, dummyBuffer, "whisper-large-v3-turbo", "en");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("networkTimeout");
+  });
+
+  it("keeps a genuine server error as apiError rather than a timeout", async () => {
+    mockCreate.mockRejectedValue(new MockAPIError(500, "Internal Server Error"));
+
+    const result = await transcribe(apiKey, dummyBuffer, "whisper-large-v3-turbo", "en");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe("apiError");
   });
 
   it("returns Err(networkTimeout) on ECONNRESET", async () => {
@@ -170,15 +231,15 @@ describe("transcription service", () => {
     if (!result.ok) expect(result.error.kind).toBe("networkTimeout");
   });
 
-  it("does not retry cloud after transient network error (fail fast)", async () => {
+  it("retries once on transient network error then succeeds", async () => {
     const networkErr = Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
     mockCreate.mockRejectedValueOnce(networkErr).mockResolvedValueOnce("Hello after retry");
 
     const result = await transcribe(apiKey, dummyBuffer, "whisper-large-v3-turbo", "en");
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error.kind).toBe("networkTimeout");
-    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe("Hello after retry");
+    expect(mockCreate).toHaveBeenCalledTimes(2);
   });
 });
 

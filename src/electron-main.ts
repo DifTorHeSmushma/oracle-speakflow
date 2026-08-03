@@ -8,19 +8,48 @@ import { performance } from "node:perf_hooks";
 import type { FSWatcher } from "node:fs";
 import { uIOhook } from "uiohook-napi";
 import { loadConfig, saveConfig } from "./utils/config.js";
-import { transcribe } from "./services/transcription.js";
+import {
+  transcribe,
+  transcribeChunk,
+  transcribeFinalize,
+  FINALIZE_MODEL,
+} from "./services/transcription.js";
 import { appendTranscript, readHistory } from "./services/transcript-store.js";
 import { keyboard, Key } from "@nut-tree-fork/nut-js";
-import { isErr, isOk } from "./utils/result.js";
+// Global: nut-js default autoDelayMs (~300) made every Ctrl+V multi-second (#13).
+keyboard.config.autoDelayMs = 0;
+import { isErr, isOk, Ok, Err } from "./utils/result.js";
 import { DEFAULT_HOTKEY, formatHotkeyLabel, HOTKEY_CONFIG_VERSION } from "./utils/defaultHotkey.js";
 import { getForegroundInfo, nativeHandleEquals, getForegroundAndCheckWindow, isDarwinSpeakFlowApp, darwinForegroundMatches, isLinuxSpeakFlowWindow, linuxForegroundMatches, type ForegroundInfo } from "./utils/win32-window.js";
+import {
+  hotGetForegroundAndAlive,
+  hotRestoreCapturedHwnd,
+  hotCtrlV,
+  hotPasteToHwnd,
+} from "./utils/win32-hot-host.js";
+import { pasteViaWmPaste, hostAcceptsBackgroundWmPaste } from "./utils/win32-paste-hwnd.js";
+import { restoreCapturedHwnd } from "./utils/win32-restore-captured.js";
 import { getLinuxSession } from "./utils/linux-session.js";
 import { getLastLinuxReadMeta } from "./utils/linux-window.js";
 import { recordExternalSample, captureNow, type TrackedTarget } from "./services/foregroundTracker.js";
-import { decideYield } from "./services/yieldFocus.js";
-import { startContinuousCapture, type CaptureSession } from "./services/capture.js";
+import { startContinuousCapture, trimWavToMaxSec, type CaptureSession } from "./services/capture.js";
 import { createVad, type VadEvents, type SpeechEndPayload } from "./services/vad.js";
-import { decidePaste, classifyTarget } from "./services/paste.js";
+import { decidePaste, classifyTarget, type PasteDecision } from "./services/paste.js";
+import {
+  planDelivery,
+  shouldShowTranscriptPreview,
+  type CapturedTarget,
+  type DeliveryAction,
+} from "./services/delivery.js";
+import { createStreamingSession, type StreamingSession } from "./services/streamingSession.js";
+import { planLiveInsert } from "./services/liveInsert.js";
+import { isLikelyWhisperHallucination } from "./services/streamHygiene.js";
+import { chooseBestTranscript } from "./services/transcriptQuality.js";
+import { createDeepgramLive, isDeepgramConfigured, type DeepgramLiveSession } from "./services/deepgramLive.js";
+import {
+  shouldReuseSpeculative,
+  shouldKickEarlySpeculative,
+} from "./services/speculativeReuse.js";
 import { getMuteState, setUserMute, setCallAppMute, setMicBusy, isCallAppActive, onMuteChange } from "./services/mute.js";
 import { correct } from "./services/correction.js";
 import { loadDictionary, saveDictionary as persistDictionary, importDictionary, exportDictionary } from "./services/dictionary.js";
@@ -81,8 +110,41 @@ let suppressBlur = false;
 type State = AppState;
 let state: State = "IDLE";
 let captureSession: CaptureSession | null = null;  // continuous FFmpeg stream (Invariant #17)
+
+// Issue #6 — Phase-1 streaming live-insert state.
+let activeStream: StreamingSession | null = null;
+let streamingFrameArmed = false;
+let liveInsertedText = "";
+/** Deepgram live socket when DEEPGRAM_API_KEY is set (#8). */
+let deepgramSession: DeepgramLiveSession | null = null;
+/** Speculative Groq finalize kicked mid-hangover so paste need not wait full RTT. */
+let speculativeGen = 0;
+let speculativePromise: Promise<string | null> | null = null;
+let speculativeWavBytes = 0;
+/** Session speech frames at kick — compare to speechFrameCount (not padded WAV bytes). */
+let speculativeSessionFrames = 0;
+/** Session frames at last mid-speech / silence-hint speculative kick (latency overlap). */
+let lastEarlySpecKickFrames = 0;
+/**
+ * Hangover / post-kick growth allowed before forcing a new Groq call.
+ * ~3s — wide enough to keep a mid-speech kick across silence-hint on short SDLC lines.
+ */
+const SPEC_TAIL_SLACK_FRAMES = 96;
+
+function float32ToS16le(frame: Float32Array): Buffer {
+  const buf = Buffer.alloc(frame.length * 2);
+  for (let i = 0; i < frame.length; i++) {
+    const s = Math.max(-1, Math.min(1, frame[i] ?? 0));
+    buf.writeInt16LE((s * 32767) | 0, i * 2);
+  }
+  return buf;
+}
+let streamFrameListenerAttached = false;
+
 let vadEvents: VadEvents | null = null;
 let callAppPollTimer: ReturnType<typeof setInterval> | null = null;
+/** Serialize hands-free pipelines — overlapping utterances were stacking pastes. */
+let handsFreePipelineChain: Promise<void> = Promise.resolve();
 
 // Config directory — set to app.getPath('userData') once the app is ready so the
 // .env file survives reinstalls.  Falls back to process.cwd() in dev mode where
@@ -122,6 +184,8 @@ let activeHotkey: HotkeyConfig = DEFAULT_HOTKEY;
 // Windows: paste target captured at utterance end / inject (Spec §4.5 — read-only, no SetForegroundWindow).
 let pasteTargetHwnd: string | null = null;
 let pasteTargetInfo: ForegroundInfo | null = null;
+/** When pasteTarget* was last set from an external window (for yield stale budget). */
+let pasteTargetSampledAtMs = 0;
 
 // ---------------------------------------------------------------------------
 // Local engine state (Wave 2 — §3.6)
@@ -129,16 +193,17 @@ let pasteTargetInfo: ForegroundInfo | null = null;
 let activeEngineHandle: EngineHandle | null = null;
 
 // ---------------------------------------------------------------------------
-// Yield-focus state (Wave 3 — §4.1 / §4.4)
-// Snapshot of the prior external foreground, taken at speechStart/keydown.
-// Used by the yield-focus ladder at inject time when SpeakFlow has focus.
+// Delivery target state (Wave 3 §4.1/§4.4 · PRD #9 LD1)
+// Snapshot of the prior external foreground, taken at speechStart/keydown. Used as the
+// delivery target when the speech-end capture is unavailable.
 // ---------------------------------------------------------------------------
 let utteranceCapture: TrackedTarget = null;
 
-// Yield-focus timing constants (Spec §0 Q3 / §4.4 — tunable for G18 smoke).
-const YIELD_STALE_MS = 2_000;
-const YIELD_SETTLE_MS = 120;
-const YIELD_MAX_WAIT_MS = 500;
+/** How long a captured target stays usable. Cloud STT runs 8–25 s, so a short budget
+ * (the original 2 s) made every hands-free finalize degrade to clipboard-only. */
+const YIELD_STALE_MS = 45_000;
+/** Settle time after hiding our window on platforms without background paste. */
+const YIELD_SETTLE_MS = 350;
 
 // ---------------------------------------------------------------------------
 // Pipeline status tracker — populated by runPipeline, queried via
@@ -254,9 +319,526 @@ function transition(next: State, extra?: { transcript?: string; error?: string }
 }
 
 function resetToIdle(error?: string): void {
+  abortDictationStream();
+  vadEvents?.setOrtPaused(false);
+  vadEvents?.setCapturePaused(false);
   pasteTargetHwnd = null;
   pasteTargetInfo = null;
   transition("IDLE", error ? { error } : undefined);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #6 — Phase-1 streaming live-insert helpers.
+// Live partials are a best-effort UX layer only: the finalize pass in
+// runPipeline() always re-transcribes the full session WAV and is the sole
+// source of truth pasted/logged. Never SetForegroundWindow (Invariant #18);
+// never insert while muted or into a terminal target (unsafe select-back).
+// ---------------------------------------------------------------------------
+
+/** Live insert: auto-on with Deepgram; Groq-chunk only if SPEAKFLOW_STREAMING_INSERT=1. */
+function isStreamingInsertEnabled(): boolean {
+  const flag = process.env["SPEAKFLOW_STREAMING_INSERT"]?.trim();
+  if (flag === "0") return false;
+  if (flag === "1") return true;
+  return isDeepgramConfigured();
+}
+
+/** Hard-stop any in-flight streaming session and discard live-insert state. */
+function abortDictationStream(): void {
+  streamingFrameArmed = false;
+  if (activeStream) {
+    activeStream.abort();
+    activeStream = null;
+  }
+  if (deepgramSession) {
+    deepgramSession.abort();
+    deepgramSession = null;
+  }
+  speculativeGen++;
+  speculativePromise = null;
+  speculativeWavBytes = 0;
+  speculativeSessionFrames = 0;
+  lastEarlySpecKickFrames = 0;
+  liveInsertedText = "";
+  liveInsertChain = Promise.resolve();
+}
+
+/**
+ * Mid-speech speculative kick. Default OFF — a second Groq call raced the
+ * silence-hint worker and inflated pasteCompleteMs. Silence-hint + worker
+ * is the ≤5s path (SPEAKFLOW_EARLY_SPEC=1 to re-enable experiments).
+ */
+function maybeKickEarlySpeculative(): void {
+  if (process.env["SPEAKFLOW_EARLY_SPEC"]?.trim() !== "1") return;
+  if (deepgramSession || !captureSession || state !== "RECORDING") return;
+  if (!isOk(liveConfig) || liveConfig.value.transcriptionMode !== "remote") return;
+  const frames = captureSession.getSessionFrameCount();
+  if (!shouldKickEarlySpeculative({ sessionFrames: frames, lastKickFrames: lastEarlySpecKickFrames })) {
+    return;
+  }
+  if (speculativePromise !== null) return;
+  lastEarlySpecKickFrames = frames;
+  speculativeGen++;
+  kickSpeculativeFinalize();
+  console.log(`[SPEC] early mid-speech kick frames=${frames}`);
+}
+
+/** Subscribe the streaming pump to a capture session's frame feed exactly once. */
+function attachStreamFramePump(session: CaptureSession): void {
+  if (streamFrameListenerAttached) return;
+  streamFrameListenerAttached = true;
+  session.onFrame((frame) => {
+    // Live-insert pump is optional; mid-speech speculative must always run (#13).
+    // Previously gated on streamingFrameArmed → zero early kicks when Deepgram off.
+    if (streamingFrameArmed) {
+      if (activeStream) activeStream.pushFrame();
+      if (deepgramSession) deepgramSession.sendPcm(float32ToS16le(frame));
+    }
+    maybeKickEarlySpeculative();
+  });
+}
+
+/** Executed keystroke for a paste decision. Extracted from runPipeline so live
+ * partials and the finalize pass share one keystroke implementation. */
+async function executePasteKeystroke(decision: PasteDecision, foreground: ForegroundInfo | null): Promise<boolean> {
+  // nut-js defaults autoDelayMs≈300 — Ctrl+V was paying multi-second key delays (#13).
+  const prevDelay = keyboard.config.autoDelayMs;
+  keyboard.config.autoDelayMs = 0;
+  try {
+    if (decision.action === "ctrlV") {
+      try {
+        if (process.platform === "darwin") {
+          await keyboard.pressKey(Key.LeftSuper, Key.V);
+          await keyboard.releaseKey(Key.LeftSuper, Key.V);
+          console.log("[INJECT] Cmd+V OK");
+        } else if (process.platform === "linux") {
+          // VTE terminals (GNOME Terminal, Tilix, Xfce, Terminator) use Ctrl+Shift+V;
+          // also accepted by Konsole, Alacritty, Kitty, WezTerm. Plain Ctrl+V for everything else.
+          if (classifyTarget(foreground) === "terminal") {
+            await keyboard.pressKey(Key.LeftControl, Key.LeftShift, Key.V);
+            await keyboard.releaseKey(Key.LeftControl, Key.LeftShift, Key.V);
+            console.log("[INJECT] Ctrl+Shift+V OK (Linux terminal)");
+          } else {
+            await keyboard.pressKey(Key.LeftControl, Key.V);
+            await keyboard.releaseKey(Key.LeftControl, Key.V);
+            console.log("[INJECT] Ctrl+V OK");
+          }
+        } else {
+          await keyboard.pressKey(Key.LeftControl, Key.V);
+          await keyboard.releaseKey(Key.LeftControl, Key.V);
+          console.log("[INJECT] Ctrl+V OK");
+        }
+        return true;
+      } catch (err) {
+        console.error(`ERROR: paste keystroke failed — ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
+    } else if (decision.action === "shiftInsert") {
+      try {
+        await keyboard.pressKey(Key.LeftShift, Key.Insert);
+        await keyboard.releaseKey(Key.LeftShift, Key.Insert);
+        console.log("[INJECT] Shift+Insert OK");
+        return true;
+      } catch (err) {
+        console.error(`ERROR: Shift+Insert failed — ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
+    }
+    // clipboardToast / drop — nothing to execute, text already on clipboard.
+    return false;
+  } finally {
+    keyboard.config.autoDelayMs = prevDelay;
+  }
+}
+
+async function selectBackChars(n: number): Promise<void> {
+  if (n <= 0) return;
+  const prevDelay = keyboard.config.autoDelayMs;
+  keyboard.config.autoDelayMs = 0;
+  try {
+    for (let i = 0; i < n; i++) {
+      await keyboard.pressKey(Key.LeftShift, Key.Left);
+      await keyboard.releaseKey(Key.LeftShift, Key.Left);
+    }
+  } finally {
+    keyboard.config.autoDelayMs = prevDelay;
+  }
+}
+
+type DeliveryContext = {
+  /** Full corrected transcript for this utterance. */
+  text: string;
+  /** Text already inserted into the field by live partials ("" when none). */
+  priorLive: string;
+  foreground: ForegroundInfo | null;
+  captured: CapturedTarget;
+  terminalVariantEnabled: boolean;
+};
+
+/**
+ * Runs one planned delivery action and reports whether the text reached the target.
+ * Returning false lets runPipeline try the plan's fallback; the transcript is already on
+ * the clipboard either way, so a false result is a degradation, never data loss.
+ */
+async function executeDelivery(action: DeliveryAction, ctx: DeliveryContext): Promise<boolean> {
+  if (action.action === "block" || action.action === "clipboardToast") {
+    console.log(`[INJECT] ${action.action} (${action.reason})`);
+    return false;
+  }
+
+  // Invariant #19 — the plan was made before this action ran, and the yield path sleeps.
+  // Re-read mute immediately before anything reaches a window.
+  if (getMuteState().muted) {
+    console.log("[INJECT] muted at delivery time — nothing sent");
+    return false;
+  }
+
+  if (action.action === "backgroundPaste") {
+    // No focus to select against, so a replace-span refinement of live text is impossible.
+    // Append-only refinements are safe; anything else degrades to the clipboard fallback.
+    let payload = ctx.text;
+    if (ctx.priorLive.length > 0) {
+      const planResult = planLiveInsert(ctx.priorLive, ctx.text);
+      if (!planResult.ok) return false;
+      const plan = planResult.value;
+      if (plan.mode === "noop") {
+        console.log("[INJECT] live insert already matches final text — nothing to deliver");
+        return true;
+      }
+      if (plan.mode !== "appendDelta") {
+        console.log("[INJECT] background paste cannot replace live span — clipboard fallback");
+        return false;
+      }
+      payload = plan.clipboardText;
+    }
+
+    try {
+      clipboard.writeText(payload);
+    } catch {
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    // Fail closed when no Win32 edit child exists (Chromium root is not delivery).
+    const ok = pasteViaWmPaste(action.hwnd);
+    try { clipboard.writeText(ctx.text); } catch { /* best-effort */ }
+    console.log(`[INJECT] backgroundPaste hwnd=${action.hwnd} ok=${ok} (${action.reason})`);
+    return ok;
+  }
+
+  if (action.action === "restoreAndKeystroke") {
+    // Issue #11 / PRD LD3 — restore ONLY the speech-end captured HWND, then keystroke.
+    if (action.variant === "ctrlV" && process.platform === "win32") {
+      const pasted = await hotPasteToHwnd(action.hwnd);
+      if (pasted.ok) {
+        console.log(
+          `[INJECT] hot PASTE ok hwnd=${action.hwnd} ms=${pasted.ms} (${action.reason})`
+        );
+        return true;
+      }
+      console.log(`[INJECT] hot PASTE miss (${pasted.detail} ms=${pasted.ms}) — fallback`);
+    }
+    let restored =
+      process.platform === "win32"
+        ? await hotRestoreCapturedHwnd(action.hwnd)
+        : restoreCapturedHwnd(action.hwnd);
+    if (!restored.ok && process.platform === "win32") {
+      restored = restoreCapturedHwnd(action.hwnd);
+    }
+    if (!restored.ok) {
+      console.log(`[INJECT] restoreAndKeystroke failed hwnd=${action.hwnd} (${restored.detail})`);
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    const decision: PasteDecision =
+      action.variant === "shiftInsert" ? { action: "shiftInsert" } : { action: "ctrlV" };
+    const ok = await executeKeystrokeDelivery(decision, ctx);
+    console.log(
+      `[INJECT] restoreAndKeystroke hwnd=${action.hwnd} ok=${ok} (${action.reason})`
+    );
+    return ok;
+  }
+
+  if (action.action === "keystroke") {
+    const decision: PasteDecision =
+      action.variant === "shiftInsert" ? { action: "shiftInsert" } : { action: "ctrlV" };
+    return executeKeystrokeDelivery(decision, ctx);
+  }
+
+  // yieldThenVerify — non-win32 ladder: hide, let the captured target return, re-verify.
+  win?.hide();
+  await new Promise((r) => setTimeout(r, action.settleMs));
+  const fg1 = getForegroundInfo();
+  const verified =
+    process.platform === "win32"
+      ? Boolean(fg1 && fg1.hwnd === action.expectHwnd)
+      : process.platform === "darwin"
+      ? darwinForegroundMatches(fg1, action.expectHwnd)
+      : linuxForegroundMatches(fg1, action.expectHwnd);
+
+  if (!verified) {
+    console.log(`[INJECT/YIELD] re-verify FAIL fg1=${fg1?.hwnd ?? "null"} expected=${action.expectHwnd}`);
+    return false;
+  }
+
+  const decision = decidePaste({
+    capturedHwnd: action.expectHwnd,
+    capturedForeground: ctx.captured?.info ?? null,
+    foreground: fg1,
+    ownHwndEquals: false,
+    muted: getMuteState().muted,
+    terminalVariantEnabled: ctx.terminalVariantEnabled,
+    classifier: classifyTarget,
+  });
+  console.log(`[INJECT/YIELD] re-verify OK → decidePaste=${decision.action}`);
+  if (decision.action !== "ctrlV" && decision.action !== "shiftInsert") return false;
+  return executeKeystrokeDelivery(decision, { ...ctx, foreground: fg1 });
+}
+
+/**
+ * Keystroke delivery into the focused target. When live partials already put text in the
+ * field, only the delta is pasted (select-back + replace) so the field is not duplicated.
+ */
+async function executeKeystrokeDelivery(
+  decision: PasteDecision,
+  ctx: DeliveryContext
+): Promise<boolean> {
+  if (ctx.priorLive.length === 0) {
+    return executePasteKeystroke(decision, ctx.foreground);
+  }
+
+  const planResult = planLiveInsert(ctx.priorLive, ctx.text);
+  const plan = planResult.ok
+    ? planResult.value
+    : ({ mode: "replaceSpan", selectBackChars: ctx.priorLive.length, clipboardText: ctx.text } as const);
+
+  if (plan.mode === "noop") {
+    console.log("[INJECT] live insert already matches final text — skipping keystroke");
+    return true;
+  }
+
+  if (plan.mode === "replaceSpan" && plan.selectBackChars > 0) {
+    await selectBackChars(plan.selectBackChars);
+  }
+  try {
+    clipboard.writeText(plan.clipboardText);
+  } catch { /* best-effort — full text already on the clipboard */ }
+  await new Promise((r) => setTimeout(r, 20));
+  const ok = await executePasteKeystroke(decision, ctx.foreground);
+  try { clipboard.writeText(ctx.text); } catch { /* best-effort */ }
+  return ok;
+}
+
+/**
+ * Simplified paste-decision resolution for LIVE partials only.
+ * No yield-focus ladder (no hide/settle/re-verify) — partials are best-effort
+ * and must never steal focus or hide the SpeakFlow window (Invariant #18).
+ */
+function resolveInjectDecision(): { decision: PasteDecision; foreground: ForegroundInfo | null } {
+  const ownHwndBuf = win?.getNativeWindowHandle() ?? Buffer.alloc(0);
+  const muteState = getMuteState();
+  const termVariant = isOk(liveConfig) ? (liveConfig.value.terminalVariantEnabled ?? false) : false;
+  const fg = getForegroundInfo();
+  const ownHwndEquals = isOwnWindowForeground(fg, ownHwndBuf);
+
+  if (ownHwndEquals) {
+    return { decision: { action: "clipboardToast", reason: "SpeakFlow window is foreground" }, foreground: fg };
+  }
+
+  const decision = decidePaste({
+    capturedHwnd: pasteTargetHwnd,
+    capturedForeground: pasteTargetInfo,
+    foreground: fg,
+    ownHwndEquals,
+    muted: muteState.muted,
+    terminalVariantEnabled: termVariant,
+    classifier: classifyTarget,
+  });
+
+  if (decision.action === "clipboardToast" && fg && !ownHwndEquals && classifyTarget(fg) === "chat") {
+    return { decision: { action: "ctrlV" }, foreground: fg };
+  }
+  return { decision, foreground: fg };
+}
+
+/** Serialize live inserts — concurrent onPartial races both see empty prior and
+ * double-paste (Dom: "Text to text test.Text to text test."). */
+let liveInsertChain: Promise<void> = Promise.resolve();
+
+/**
+ * Apply one live partial to the focused field. Best-effort, silent-fail:
+ * mute / terminal-target / plan errors all skip without surfacing UI noise.
+ * Never calls showInactive — partials must not flash the tray window.
+ */
+async function applyLivePartial(text: string): Promise<void> {
+  const run = async (): Promise<void> => {
+    if (getMuteState().muted) return;
+    if (isLikelyWhisperHallucination(text)) return;
+
+    const { decision, foreground } = resolveInjectDecision();
+    // Select-back on a terminal target is unsafe (no reliable caret semantics) —
+    // skip live insert there; the finalize pass still pastes once at speechEnd.
+    if (classifyTarget(foreground) === "terminal") return;
+    if (decision.action !== "ctrlV" && decision.action !== "shiftInsert") return;
+
+    const planResult = planLiveInsert(liveInsertedText, text);
+    if (!planResult.ok) return;
+    const plan = planResult.value;
+    if (plan.mode === "noop") return;
+
+    const t0 = performance.now();
+    try {
+      clipboard.writeText(plan.clipboardText);
+    } catch {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    if (plan.mode === "replaceSpan" && plan.selectBackChars > 0) {
+      await selectBackChars(plan.selectBackChars);
+    }
+
+    const ok = await executePasteKeystroke(decision, foreground);
+    if (ok) {
+      liveInsertedText = text;
+    }
+    appendLatencyLog({
+      event: "live_partial",
+      mode: plan.mode,
+      chars: text.length,
+      latencyMs: Math.round(performance.now() - t0),
+      ok,
+    });
+  };
+
+  const next = liveInsertChain.then(run, run);
+  liveInsertChain = next.then(
+    () => undefined,
+    () => undefined
+  );
+  await next;
+}
+
+/** Start live ASR for the active utterance — Deepgram preferred; Groq chunks only if forced. */
+function beginDictationStream(): void {
+  void beginDictationStreamAsync();
+}
+
+async function beginDictationStreamAsync(): Promise<void> {
+  if (!isStreamingInsertEnabled()) return;
+  if (!isOk(liveConfig) || liveConfig.value.transcriptionMode !== "remote") return;
+  if (!captureSession) return;
+  const session = captureSession;
+
+  if (isDeepgramConfigured()) {
+    const dg = await createDeepgramLive((text) => {
+      void applyLivePartial(text);
+    });
+    if (dg.ok) {
+      deepgramSession = dg.value;
+      streamingFrameArmed = true;
+      console.log("[DG] live streaming armed (nova-2)");
+      return;
+    }
+    console.error(`[DG] open failed: ${dg.error.message} — no Groq-chunk fallback (Gate Alpha)`);
+    return;
+  }
+
+  // Explicit opt-in only — Groq file-chunks are not Aqua-class.
+  if (process.env["SPEAKFLOW_STREAMING_INSERT"]?.trim() !== "1") return;
+
+  const { groqApiKey, model, language } = liveConfig.value;
+  activeStream = createStreamingSession({
+    transcribeChunk: (wav, prompt) => transcribeChunk(groqApiKey, wav, model, language, prompt),
+    getChunkWav: (start, end) => session.peekSessionWav(start, end),
+    onPartial: (text) => {
+      void applyLivePartial(text);
+    },
+  });
+  activeStream.syncFrameCount(session.getSessionFrameCount());
+  streamingFrameArmed = true;
+}
+
+/** Kick Groq finalize on a WAV so speech_end / hangover can overlap RTT with drain. */
+function kickSpeculativeFinalizeWithWav(wav: Buffer, sessionFrames: number): void {
+  if (deepgramSession) return;
+  if (!isOk(liveConfig) || state !== "RECORDING") return;
+  if (liveConfig.value.transcriptionMode !== "remote") return;
+  if (wav.length < 44 + 16000) return; // <0.5 s
+
+  const gen = speculativeGen;
+  const { groqApiKey, language, transcriptionMode, modelTier } = liveConfig.value;
+  const searchDirs = [getBundledBinDir(), join(configDir, "models")];
+  const rawAudioSec = (wav.length - 44) / 32000;
+  const wavForAsr = rawAudioSec > 28 ? trimWavToMaxSec(wav, 28) : wav;
+  speculativeWavBytes = wav.length;
+  speculativeSessionFrames = sessionFrames;
+  // Free the Electron main thread so Groq fetch can finish in ~1s (not ~12–18s).
+  vadEvents?.setOrtPaused(true);
+  console.log(`[SPEC] speculative finalize start audioSec=${rawAudioSec.toFixed(2)} model=${FINALIZE_MODEL}`);
+  speculativePromise = transcribeFinalize(
+    groqApiKey,
+    wavForAsr,
+    language,
+    transcriptionMode,
+    modelTier,
+    searchDirs,
+    activeEngineHandle ?? undefined
+  ).then((r) => {
+    if (gen !== speculativeGen) return null;
+    if (!r.ok) return null;
+    const t = r.value.trim();
+    if (!t || isLikelyWhisperHallucination(t)) return null;
+    console.log(`[SPEC] speculative ready chars=${t.length}`);
+    // No rolling refresh here — a second Groq call stacked on the main thread
+    // and pushed Dom back to ~12–18s. Silence-hint owns the near-final WAV.
+    return t;
+  });
+}
+
+/** Kick Groq finalize during hangover so speech_end often finds the transcript ready. */
+function kickSpeculativeFinalize(): void {
+  if (!captureSession) return;
+  const frames = captureSession.getSessionFrameCount();
+  const wav = captureSession.peekSessionWav(0, frames);
+  if (!wav) return;
+  kickSpeculativeFinalizeWithWav(wav, frames);
+}
+
+/** Disarm the streaming pump and drain in-flight ASR (issue #6 latency).
+ * Previously abort()'d immediately, discarding Groq chunks that returned after
+ * speech_end → liveChars=0 and an 8–12s blocking finalize. */
+async function endDictationStream(): Promise<string> {
+  streamingFrameArmed = false;
+  const stream = activeStream;
+  activeStream = null;
+  if (!stream) return liveInsertedText;
+
+  const DRAIN_MS = 3000;
+  let assembled = "";
+  try {
+    assembled = await Promise.race([
+      stream.drainInFlight(),
+      new Promise<string>((resolve) => {
+        setTimeout(() => resolve(stream.getAssembledText()), DRAIN_MS);
+      }),
+    ]);
+  } catch (err) {
+    process.stderr.write(`[stream] drain error: ${String(err)}\n`);
+    assembled = stream.getAssembledText();
+  }
+
+  stream.abort();
+
+  const best = (liveInsertedText.trim() || assembled.trim()).trim();
+  if (
+    best &&
+    !liveInsertedText.trim() &&
+    !isLikelyWhisperHallucination(best)
+  ) {
+    await applyLivePartial(best);
+  }
+
+  return liveInsertedText.trim() || best;
 }
 
 // In hands-free mode, re-arm LISTENING immediately after IDLE so the next
@@ -299,6 +881,7 @@ function isOwnWindowForeground(fg: ForegroundInfo | null, ownHwndBuf: Buffer): b
 function captureTargetHwnd(): void {
   pasteTargetHwnd = null;
   pasteTargetInfo = null;
+  pasteTargetSampledAtMs = 0;
   if (!hasVerifiedForegroundPath() || !win) return;
   const fg = getForegroundInfo();
   const ours = win.getNativeWindowHandle();
@@ -312,6 +895,7 @@ function captureTargetHwnd(): void {
   }
   pasteTargetHwnd = fg.hwnd;
   pasteTargetInfo = fg;
+  pasteTargetSampledAtMs = Date.now();
   console.log(`[REC] paste target HWND=${fg.hwnd} class=${fg.className} proc=${fg.processName}`);
 }
 
@@ -332,14 +916,10 @@ function startCallAppPoll(allowlist: string[]): void {
 
     if (process.platform !== "win32") return;
 
-    exec("tasklist /FO CSV /NH", { timeout: 2_000 }, (_err, stdout) => {
-      if (!stdout) return;
-      const procs: string[] = stdout.split("\n").flatMap((line) => {
-        const m = /^"([^"]+)"/.exec(line.trim());
-        return m && m[1] ? [m[1]] : [];
-      });
-      setCallAppMute(isCallAppActive(procs, allowlist));
-    });
+    // Only mute when a call app owns the foreground window — not when it sits in the tray.
+    const fg = getForegroundInfo();
+    const foregroundProc = fg?.processName ? [fg.processName] : [];
+    setCallAppMute(isCallAppActive(foregroundProc, allowlist));
   }, 1_000);
 }
 
@@ -380,12 +960,25 @@ async function startContinuousMode(): Promise<void> {
       if (state !== "LISTENING") return; // Invariant #6
       // Wave 3 §4.1: snapshot the prior external target at speechStart.
       utteranceCapture = captureNow(Date.now());
+      // Issue #6: capture a paste target now so live partials have somewhere to land;
+      // finishHandsFreeUtterance refreshes it again closer to the finalize inject.
+      captureTargetHwnd();
+      speculativeGen++;
+      speculativePromise = null;
+      speculativeWavBytes = 0;
+      speculativeSessionFrames = 0;
+      lastEarlySpecKickFrames = 0;
+      vadEvents?.setOrtPaused(false);
       transition("RECORDING");
+      beginDictationStream();
     };
 
     const finishHandsFreeUtterance = (payload: SpeechEndPayload): void => {
       const { wav, detailed } = payload;
-      if (wav.length <= 44) return; // empty WAV header only
+      if (wav.length <= 44) {
+        abortDictationStream();
+        return; // empty WAV header only
+      }
 
       if (isCaptureDiagEnabled() && captureSession) {
         pendingCaptureDiag = {
@@ -405,6 +998,7 @@ async function startContinuousMode(): Promise<void> {
       }
       if (state !== "RECORDING") {
         // E2: segment taken while pipeline still busy — count as discard (Phase 0).
+        abortDictationStream();
         flushCaptureDiag({
           accepted: false,
           discardReason: `speechEnd_discarded_wrong_state:${state}`,
@@ -414,35 +1008,123 @@ async function startContinuousMode(): Promise<void> {
       // Capture target at utterance end (closer to inject than speechStart — hands-free latency fix).
       captureTargetHwnd();
       const t0 = performance.now();
-      appendLatencyLog({
-        event: "speech_end",
-        voiceMode: "handsFree",
-        wavBytes: wav.length,
-        audioSec: Math.round(((wav.length - 44) / 32000) * 100) / 100,
-        vadQueueDepthMax: payload.vadQueueDepthMax,
-        vadProcessLagFrames: payload.vadProcessLagFrames,
-        ortRunMsLast: payload.ortRunMsLast,
+      const redemptionFrames = isOk(liveConfig) ? liveConfig.value.vad.redemptionFrames : null;
+      const speechFrames = detailed.meta.speechFrameCount;
+      // LATENCY_CONTRACT: reuse mid-speech / silence-hint Groq when frames are close.
+      // Always resetting here forced a fresh ~10–20s RTT after Dom stopped talking.
+      // Hangover after silence-hint is silence-only — allow full redemption slack
+      // so we never start a second Groq at speech_end (Dom #13 double-RTT).
+      const reuse = shouldReuseSpeculative({
+        hasPromise: speculativePromise !== null,
+        speculativeSessionFrames,
+        finalSpeechFrames: speechFrames,
+        slackFrames: (redemptionFrames ?? 79) + 24,
       });
-      runPipeline(wav, "handsFree", t0).catch((err: unknown) => {
-        console.error("[HF] unhandled pipeline error:", err);
-        flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
-        resetToIdle("Unexpected error");
-        maybeRelisten();
+      let settleWav: "reuse" | "final" = "final";
+      if (reuse) {
+        settleWav = "reuse";
+        console.log(
+          `[SPEC] reuse in-flight speculative kickFrames=${speculativeSessionFrames} finalSpeechFrames=${speechFrames}`
+        );
+      } else {
+        speculativeGen++;
+        speculativePromise = null;
+        speculativeWavBytes = 0;
+        speculativeSessionFrames = 0;
+        kickSpeculativeFinalizeWithWav(wav, speechFrames);
+      }
+      const specForPipeline = speculativePromise;
+      const speculativeOk = specForPipeline !== null;
+      // Leave RECORDING immediately so a mid-pipeline VAD speechEnd cannot start a
+      // second finalize and invalidate this kick (Dom #13: ~24s double-Groq).
+      vadEvents?.setCapturePaused(true);
+      transition("TRANSCRIBING");
+
+      void endDictationStream().then(async (liveText) => {
+        let deepgramText: string | null = null;
+        if (deepgramSession) {
+          try {
+            deepgramText = (await deepgramSession.finish()).trim() || null;
+          } catch (err) {
+            console.error("[DG] finish error:", err);
+          }
+          deepgramSession = null;
+        }
+
+        appendLatencyLog({
+          event: "speech_end",
+          voiceMode: "handsFree",
+          wavBytes: wav.length,
+          audioSec: Math.round(((wav.length - 44) / 32000) * 100) / 100,
+          vadQueueDepthMax: payload.vadQueueDepthMax,
+          vadProcessLagFrames: payload.vadProcessLagFrames,
+          ortRunMsLast: payload.ortRunMsLast,
+          liveChars: liveText.length,
+          redemptionFrames,
+          deepgramChars: deepgramText?.length ?? 0,
+          speculativePending: speculativeOk,
+          speechFrameCount: speechFrames,
+          settleWav,
+          speculativeReuse: reuse,
+        });
+        // Do not queue behind a prior utterance — a stuck/slow finalize was
+        // adding multi-second delays to the next paste (#13).
+        void runPipeline(wav, "handsFree", t0, liveText, deepgramText, specForPipeline).catch(
+          (err: unknown) => {
+            console.error("[HF] unhandled pipeline error:", err);
+            flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
+            resetToIdle("Unexpected error");
+            maybeRelisten();
+          }
+        );
       });
     };
 
     vadEvents.onSpeechStart(beginHandsFreeUtterance);
     vadEvents.onSpeechEnd(finishHandsFreeUtterance);
+    // Silence-hint: keep mid-speech Groq if nearly complete — a fresh kick here
+    // was wiping ~2–5s of overlap and forcing Dom back to ~12–20s waits.
+    vadEvents.onSilenceHint(() => {
+      if (state !== "RECORDING" || !captureSession) return;
+      const frames = captureSession.getSessionFrameCount();
+      // Only keep an in-flight kick when it already has nearly-final audio
+      // (hangover slack). Keeping a mid-speech 2s WAV drops Dom's last words
+      // and still waits on a slow/partial call.
+      const keep = shouldReuseSpeculative({
+        hasPromise: speculativePromise !== null,
+        speculativeSessionFrames,
+        finalSpeechFrames: frames,
+        slackFrames: 40,
+      });
+      lastEarlySpecKickFrames = frames;
+      vadEvents?.setOrtPaused(true);
+      if (keep) {
+        console.log(
+          `[SPEC] silence-hint keep in-flight kickFrames=${speculativeSessionFrames} now=${frames}`
+        );
+        return;
+      }
+      speculativeGen++;
+      speculativePromise = null;
+      kickSpeculativeFinalize();
+      console.log(`[SPEC] silence-hint kick frames=${frames} (fresh near-final WAV)`);
+    });
     vadEvents.arm();
+    if (captureSession) attachStreamFramePump(captureSession);
 
     startCallAppPoll(cfg.callAppAllowlist ?? []);
-    console.log("[HF] hands-free armed — LISTENING");
+    console.log(
+      `[HF] hands-free armed — LISTENING redemptionFrames=${cfg.vad.redemptionFrames}` +
+        (isDeepgramConfigured() ? " deepgram=on" : " deepgram=off speculative=overlap")
+    );
   }
   // PTT mode: capture is running but no VAD; keydown/keyup drive the cycle
 }
 
 async function stopContinuousMode(): Promise<void> {
   stopCallAppPoll();
+  abortDictationStream();
+  streamFrameListenerAttached = false;
   vadEvents?.stop();
   vadEvents = null;
   await captureSession?.stop();
@@ -479,7 +1161,14 @@ function showWindow(): void {
 // voiceMode drives the terminal state: "handsFree" → LISTENING, "ptt" → IDLE.
 // Invariant #12: every exit path calls resetToIdle() or transitions explicitly.
 // ---------------------------------------------------------------------------
-async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", captureEndT0?: number): Promise<void> {
+async function runPipeline(
+  wavBuffer: Buffer,
+  voiceMode: "handsFree" | "ptt",
+  captureEndT0?: number,
+  preferLiveText?: string,
+  deepgramText?: string | null,
+  speculativePromiseArg?: Promise<string | null> | null
+): Promise<void> {
   if (!isOk(liveConfig)) {
     console.error("[PIPELINE] no config — API key missing");
     resetToIdle("API key not configured — tap the tray icon to set it");
@@ -497,94 +1186,231 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   if (captureEndT0 !== undefined) {
     console.log(`[LATENCY] capture-end→transcribe-start: ${(performance.now() - captureEndT0).toFixed(0)} ms`);
   }
+
+  /** Live text is during-speech UX only. Gate Alpha FAIL (#8): skippedFinalize froze
+   * wrong/partial lines. Full-session ASR is always the settle source of truth. */
+  const liveFallback = (): string | null => {
+    const live = liveInsertedText.trim() || (preferLiveText ?? "").trim();
+    if (!live || isLikelyWhisperHallucination(live)) return null;
+    return live;
+  };
+
+  let transcriptForCorrect: string | null = null;
+
   console.log("transcribing...");
   const transcribeT0 = performance.now();
-  const audioSec = Math.round(((wavBuffer.length - 44) / 32000) * 100) / 100;
+  const FINALIZE_MAX_SEC = 28;
+  const rawAudioSec = Math.round(((wavBuffer.length - 44) / 32000) * 100) / 100;
+  const wavForAsr =
+    rawAudioSec > FINALIZE_MAX_SEC ? trimWavToMaxSec(wavBuffer, FINALIZE_MAX_SEC) : wavBuffer;
+  const audioSec = Math.round(((wavForAsr.length - 44) / 32000) * 100) / 100;
+  if (wavForAsr !== wavBuffer) {
+    console.log(`[TRANSCRIBE] trimmed finalize wav ${rawAudioSec}s → ${audioSec}s`);
+  }
 
-  const textResult = await transcribe(
-    groqApiKey, wavBuffer, model, language, transcriptionMode,
-    modelTier, searchDirs, activeEngineHandle ?? undefined,
-  );
+  /** Deepgram finals are settle truth when present (#8).
+   * Issue #13: await the in-flight speculative promise (hangover or speech_end kick)
+   * up to CLOUD_FINALIZE_TIMEOUT — never stack a second Groq finalize on the same WAV. */
+  let textResult: Awaited<ReturnType<typeof transcribe>>;
+  let settleSource: "deepgram" | "speculative" | "groq" | "live-fallback" = "groq";
+  let specWaitMs = 0;
+  let finalizeModelUsed: string | null = null;
+
+  const dg = (deepgramText ?? "").trim();
+  if (dg && !isLikelyWhisperHallucination(dg)) {
+    textResult = Ok(dg);
+    settleSource = "deepgram";
+    console.log(`[TRANSCRIBE] settle=deepgram chars=${dg.length}`);
+  } else if (speculativePromiseArg) {
+    // Await the in-flight hangover/speech_end kick only — timeout lives inside
+    // transcribeFinalize. A second shorter race was killing live mic settles at ~3s.
+    const waitT0 = performance.now();
+    const early = await speculativePromiseArg;
+    specWaitMs = Math.round(performance.now() - waitT0);
+    finalizeModelUsed = FINALIZE_MODEL;
+    // Final-WAV kick is the settle source (hangover peeks disabled). Trust it.
+    if (early && !isLikelyWhisperHallucination(early)) {
+      textResult = Ok(early);
+      settleSource = "speculative";
+      console.log(
+        `[TRANSCRIBE] settle=speculative chars=${early.length} specWaitMs=${specWaitMs}`
+      );
+    } else {
+      const live = liveFallback();
+      if (live) {
+        textResult = Ok(live);
+        settleSource = "live-fallback";
+        console.log(
+          `[TRANSCRIBE] settle=live-fallback chars=${live.length} (speculative miss; specWaitMs=${specWaitMs})`
+        );
+      } else {
+        // One more finalize on the same final WAV if the in-flight kick failed.
+        textResult = await transcribeFinalize(
+          groqApiKey, wavForAsr, language, transcriptionMode,
+          modelTier, searchDirs, activeEngineHandle ?? undefined,
+        );
+        settleSource = "groq";
+        console.log(
+          textResult.ok
+            ? `[TRANSCRIBE] settle=groq-finalize chars=${textResult.value.length} specWaitMs=${specWaitMs}`
+            : `[TRANSCRIBE] finalize miss (specWaitMs=${specWaitMs})`
+        );
+      }
+    }
+  } else {
+    finalizeModelUsed = FINALIZE_MODEL;
+    textResult = await transcribeFinalize(
+      groqApiKey, wavForAsr, language, transcriptionMode,
+      modelTier, searchDirs, activeEngineHandle ?? undefined,
+    );
+  }
 
   const transcribeWallMs = Math.round(performance.now() - transcribeT0);
   console.log(
-    `[LATENCY] transcribe-wall: ${transcribeWallMs} ms mode=${transcriptionMode}`
+    `[LATENCY] transcribe-wall: ${transcribeWallMs} ms mode=${transcriptionMode} settle=${settleSource}`
   );
   appendLatencyLog({
     event: "transcribe_done",
     voiceMode,
     mode: transcriptionMode,
     model,
+    finalizeModel: finalizeModelUsed,
     audioSec,
-    wavBytes: wavBuffer.length,
+    rawAudioSec,
+    wavBytes: wavForAsr.length,
     transcribeWallMs,
+    specWaitMs,
     ok: textResult.ok,
     errKind: textResult.ok ? null : textResult.error.kind,
+    liveChars: liveInsertedText.length,
+    skippedFinalize: false,
+    settleSource,
   });
 
   if (isErr(textResult)) {
     const { error } = textResult;
     lastPipelineStatus.lastErrorKind = error.kind;
-    let errMsg: string;
-    switch (error.kind) {
-      case "invalidApiKey":
-        console.error(`ERROR: Invalid API key (${MASKED_KEY}) — check your .env file`);
-        errMsg = "Invalid API key";
-        break;
-      case "networkTimeout":
-        console.error("ERROR: Network timeout after retries");
-        errMsg = "Network timeout";
-        break;
-      case "emptyTranscription":
-        console.log("(silence — nothing to paste)");
-        errMsg = "";
-        break;
-      case "apiError":
-        console.error(`ERROR: Groq API ${error.statusCode} — ${error.message}`);
-        errMsg = `API error ${error.statusCode}`;
-        break;
-      case "localModelNotFound":
-        console.error(`ERROR: Local model not found — ${error.message}`);
-        errMsg = "Local model not found";
-        break;
-      case "localTranscriptionFailed":
-        console.error(`ERROR: Local transcription failed — ${error.message}`);
-        errMsg = "Local transcription failed";
-        break;
-      default: {
-        const _exhaustive: never = error;
-        console.error("ERROR: Unknown transcription error", _exhaustive);
-        errMsg = "Transcription failed";
-      }
-    }
-    flushCaptureDiag({
-      accepted: true,
-      discardReason: null,
-      text: errMsg || "(empty)",
-    });
-    // Hotfix-C: hands-free mode must NOT call resetToIdle() followed by maybeRelisten().
-    // resetToIdle() emits IDLE+error; maybeRelisten() immediately emits bare LISTENING,
-    // overwriting the error payload before the renderer can display it. Instead, emit a
-    // single transition carrying the error so the renderer always sees it.
-    pasteTargetHwnd = null;
-    pasteTargetInfo = null;
-    if (voiceMode === "handsFree") {
-      transition("LISTENING", errMsg ? { error: errMsg } : undefined);
+    const live = liveFallback();
+    const canKeepLive =
+      live !== null &&
+      (error.kind === "apiError" ||
+        error.kind === "networkTimeout" ||
+        error.kind === "emptyTranscription" ||
+        error.kind === "localTranscriptionFailed");
+
+    if (canKeepLive && live) {
+      console.log(
+        `[TRANSCRIBE] finalize failed (${error.kind}); keeping live insert (${live.length} chars)`
+      );
+      transcriptForCorrect = live;
     } else {
-      transition("IDLE", errMsg ? { error: errMsg } : undefined);
+      let errMsg: string;
+      switch (error.kind) {
+        case "invalidApiKey":
+          console.error(`ERROR: Invalid API key (${MASKED_KEY}) — check your .env file`);
+          errMsg = "Invalid API key";
+          break;
+        case "networkTimeout":
+          console.error("ERROR: Network timeout after retries");
+          errMsg = "Network timeout";
+          break;
+        case "emptyTranscription":
+          console.log("(silence — nothing to paste)");
+          errMsg = "";
+          break;
+        case "apiError":
+          console.error(`ERROR: Groq API ${error.statusCode} — ${error.message}`);
+          errMsg = `API error ${error.statusCode}`;
+          break;
+        case "localModelNotFound":
+          console.error(`ERROR: Local model not found — ${error.message}`);
+          errMsg = "Local model not found";
+          break;
+        case "localTranscriptionFailed":
+          console.error(`ERROR: Local transcription failed — ${error.message}`);
+          errMsg = "Local transcription failed";
+          break;
+        default: {
+          const _exhaustive: never = error;
+          console.error("ERROR: Unknown transcription error", _exhaustive);
+          errMsg = "Transcription failed";
+        }
+      }
+      flushCaptureDiag({
+        accepted: true,
+        discardReason: null,
+        text: errMsg || "(empty)",
+      });
+      pasteTargetHwnd = null;
+      pasteTargetInfo = null;
+      liveInsertedText = "";
+      if (voiceMode === "handsFree") {
+        transition("LISTENING", errMsg ? { error: errMsg } : undefined);
+      } else {
+        transition("IDLE", errMsg ? { error: errMsg } : undefined);
+      }
+      return;
     }
-    return;
+  } else {
+    const finalized = textResult.value.trim();
+    const live = liveFallback();
+    if (isLikelyWhisperHallucination(finalized)) {
+      if (live) {
+        console.log(
+          `[TRANSCRIBE] finalize looked like hallucination; keeping live insert (${live.length} chars)`
+        );
+        transcriptForCorrect = live;
+      } else {
+        console.log("(silence/hallucination — nothing to paste)");
+        flushCaptureDiag({
+          accepted: true,
+          discardReason: null,
+          text: "(empty)",
+        });
+        pasteTargetHwnd = null;
+        pasteTargetInfo = null;
+        liveInsertedText = "";
+        if (voiceMode === "handsFree") transition("LISTENING");
+        else transition("IDLE");
+        return;
+      }
+    } else {
+      if (live && live !== finalized) {
+        console.log(
+          `[TRANSCRIBE] finalize replaces live "${live.slice(0, 40)}" → "${finalized.slice(0, 40)}"`
+        );
+      }
+      transcriptForCorrect = textResult.value;
+    }
   }
 
   // ── CORRECTING ────────────────────────────────────────────────────────────
   transition("CORRECTING");
   const dictResult = loadDictionary(configDir);
   const dict = isOk(dictResult) ? dictResult.value : { version: 1, entries: [] };
-  const { text, ms: corrMs } = await correct(textResult.value, dict, correction);
-  console.log(`[CORRECTING] done in ${corrMs.toFixed(1)} ms → "${text.slice(0, 60)}"`);
+  if (!transcriptForCorrect) {
+    pasteTargetHwnd = null;
+    pasteTargetInfo = null;
+    liveInsertedText = "";
+    if (voiceMode === "handsFree") transition("LISTENING");
+    else transition("IDLE");
+    return;
+  }
+  const { text: corrected, ms: corrMs } = await correct(transcriptForCorrect, dict, correction);
+  const liveForChoice = liveFallback();
+  const choice = chooseBestTranscript({
+    finalized: transcriptForCorrect,
+    live: liveForChoice,
+    correctedFinalized: corrected,
+  });
+  const text = choice.text;
+  console.log(
+    `[CORRECTING] done in ${corrMs.toFixed(1)} ms → "${text.slice(0, 60)}" (choice=${choice.source}: ${choice.reason})`
+  );
 
   // ── INJECTING ─────────────────────────────────────────────────────────────
   transition("INJECTING");
+  const injectT0 = performance.now();
   console.log("pasting...");
 
   // Write to Electron clipboard (native, no asar path hazard — CLAUDE.md Architecture note).
@@ -606,167 +1432,130 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
     return;
   }
 
-  // Brief pause so clipboard write is committed before the keystroke.
-  await new Promise((r) => setTimeout(r, 80));
-
-  // Hands-free: refresh paste target immediately before inject (transcription adds 0.5–2s latency).
-  if (voiceMode === "handsFree") {
-    captureTargetHwnd();
-  }
+  // Brief pause so the clipboard write is committed before delivery reads it.
+  await new Promise((r) => setTimeout(r, 20));
 
   const ownHwndBuf = win?.getNativeWindowHandle() ?? Buffer.alloc(0);
   const muteState = getMuteState();
   const termVariant = isOk(liveConfig) ? (liveConfig.value.terminalVariantEnabled ?? false) : false;
 
   // ---------------------------------------------------------------------------
-  // Wave 3 — yield-focus ladder (Spec §4.4 / Invariant #18 / G19).
-  // When SpeakFlow is focused at inject time, yield to the prior external target
-  // then re-verify before keystroke. Text already in clipboard — fallback is
-  // clipboard+toast (no keystroke). No SetForegroundWindow anywhere.
+  // Finalize delivery (PRD-windows-dictation-delivery-brownfield §7).
+  // The window captured at speech end is delivery truth (LD1) — the foreground after a
+  // 10–25 s cloud call is not. planDelivery is pure and unit-gated (G-D1/G-D2); this block
+  // only executes its decision. No SetForegroundWindow anywhere (Invariant #18).
   // ---------------------------------------------------------------------------
-  let finalDecision: ReturnType<typeof decidePaste>;
-  let pasteTargetForeground: ForegroundInfo | null = null;
+  const captured: CapturedTarget =
+    pasteTargetHwnd && pasteTargetInfo
+      ? { info: pasteTargetInfo, sampledAtMs: pasteTargetSampledAtMs || Date.now() }
+      : utteranceCapture;
 
-  if (hasVerifiedForegroundPath()) {
-    const capturedHwnd = utteranceCapture?.info?.hwnd ?? null;
-    const { foreground: fg, isWindowAlive: priorAlive } = getForegroundAndCheckWindow(capturedHwnd);
-    const ownHwndEquals = isOwnWindowForeground(fg, ownHwndBuf);
+  const priorLive = liveInsertedText;
+  const hadLiveInsert = priorLive.length > 0;
+  let delivered = false;
+  let deliveryMethod: string = "none";
 
-    if (ownHwndEquals) {
-      const plan = decideYield({
-        ownHwndEquals,
-        captured: utteranceCapture,
-        nowMs: Date.now(),
-        priorHwndAlive: priorAlive,
-        staleMs: YIELD_STALE_MS,
-        settleMs: YIELD_SETTLE_MS,
-        maxWaitMs: YIELD_MAX_WAIT_MS,
-      });
-      console.log(`[INJECT/YIELD] plan=${plan.action}${plan.action === "clipboardToast" ? ` (${plan.reason})` : ""}${plan.action === "yieldThenVerify" ? ` expectHwnd=${plan.expectHwnd}` : ""}`);
+  // Lock B (Spec §0 Q2): Wayland/unknown Linux sessions never reach a keystroke.
+  const keystrokePathLocked = process.platform === "linux" && getLinuxSession() !== "x11";
 
-      if (plan.action === "clipboardToast") {
-        finalDecision = { action: "clipboardToast", reason: plan.reason };
-      } else if (plan.action === "yieldThenVerify") {
-        win?.hide();
-        await new Promise((r) => setTimeout(r, plan.settleMs));
-        const fg1 = getForegroundInfo();
-        const verified =
-          process.platform === "win32"
-            ? Boolean(fg1 && fg1.hwnd === plan.expectHwnd)
-            : process.platform === "darwin"
-            ? darwinForegroundMatches(fg1, plan.expectHwnd)
-            : linuxForegroundMatches(fg1, plan.expectHwnd);
-        if (!verified) {
-          console.log(`[INJECT/YIELD] re-verify FAIL fg1=${fg1?.hwnd ?? "null"} expected=${plan.expectHwnd} → clipboard+toast`);
-          finalDecision = { action: "clipboardToast", reason: "post-yield foreground mismatch" };
-        } else {
-          finalDecision = decidePaste({
-            capturedHwnd: plan.expectHwnd,
-            capturedForeground: utteranceCapture?.info ?? null,
-            foreground: fg1,
-            ownHwndEquals: false,
-            muted: muteState.muted,
-            terminalVariantEnabled: termVariant,
-            classifier: classifyTarget,
-          });
-          pasteTargetForeground = fg1;
-          console.log(`[INJECT/YIELD] re-verify OK → decidePaste=${finalDecision.action}`);
-        }
-      } else {
-        finalDecision = { action: "clipboardToast", reason: "unexpected noYield when focused" };
-      }
-    } else {
-      const decision = decidePaste({
-        capturedHwnd: pasteTargetHwnd,
-        capturedForeground: pasteTargetInfo,
-        foreground: fg,
-        ownHwndEquals,
-        muted: muteState.muted,
-        terminalVariantEnabled: termVariant,
-        classifier: classifyTarget,
-      });
-      if (decision.action === "clipboardToast" && fg && !ownHwndEquals && classifyTarget(fg) === "chat") {
-        finalDecision = { action: "ctrlV" };
-        console.log(`[INJECT] chat-foreground fallback → paste (${fg.processName})`);
-      } else {
-        finalDecision = decision;
-      }
-      pasteTargetForeground = fg;
+  if (!hasVerifiedForegroundPath() || keystrokePathLocked) {
+    deliveryMethod = "clipboardToast";
+    console.log(
+      `[INJECT] clipboardToast (${keystrokePathLocked ? "non-X11 session — keystroke path locked" : "no verified foreground path"})`
+    );
+  } else if (
+    process.platform === "win32" &&
+    captured?.info?.hwnd &&
+    !muteState.muted
+  ) {
+    // Fast path for Dom daily Cursor use: skip cold PowerShell foreground probes.
+    // Captured HWND at speech_end is delivery truth (LD1) — restore + Ctrl+V.
+    const hwnd = captured.info.hwnd;
+    const ctx: DeliveryContext = {
+      text,
+      priorLive,
+      foreground: captured.info,
+      captured,
+      terminalVariantEnabled: termVariant,
+    };
+    deliveryMethod = "restoreAndKeystroke";
+    delivered = await executeDelivery(
+      {
+        action: "restoreAndKeystroke",
+        hwnd,
+        variant: "ctrlV",
+        reason: "fast-path captured HWND (skip PS foreground)",
+      },
+      ctx
+    );
+    if (!delivered) {
+      deliveryMethod = "clipboardToast";
+      console.log("[INJECT] fast-path restore failed — clipboard has text");
     }
   } else {
-    const fg = getForegroundInfo();
+    const fgAlive =
+      process.platform === "win32"
+        ? await hotGetForegroundAndAlive(captured?.info?.hwnd ?? null).catch(() =>
+            getForegroundAndCheckWindow(captured?.info?.hwnd ?? null)
+          )
+        : getForegroundAndCheckWindow(captured?.info?.hwnd ?? null);
+    const fg = fgAlive.foreground;
+    const capturedAlive = fgAlive.isWindowAlive;
     const ownHwndEquals = isOwnWindowForeground(fg, ownHwndBuf);
-    finalDecision = decidePaste({
-      capturedHwnd: pasteTargetHwnd,
-      capturedForeground: pasteTargetInfo,
-      foreground: fg,
-      ownHwndEquals,
+
+    const plan = planDelivery({
       muted: muteState.muted,
+      captured,
+      capturedAlive,
+      foreground: fg,
+      ownWindowIsForeground: ownHwndEquals,
+      nowMs: Date.now(),
+      staleMs: YIELD_STALE_MS,
       terminalVariantEnabled: termVariant,
       classifier: classifyTarget,
+      backgroundPasteSupported: process.platform === "win32",
+      hostAcceptsWmPaste: hostAcceptsBackgroundWmPaste(captured?.info ?? null),
+      restoreCapturedSupported: process.platform === "win32",
+      settleMs: YIELD_SETTLE_MS,
     });
-    pasteTargetForeground = fg;
-  }
+    console.log(`[INJECT] plan primary=${plan.primary.action} fallback=${plan.fallback.action}`);
 
-  // Lock B (Spec §0 Q2): session-gate keystroke on Linux. Wayland/unknown never reaches
-  // a keystroke — both locks (A: null foreground; B: here) must fail open to break this.
-  if (process.platform === "linux" && getLinuxSession() !== "x11") {
-    finalDecision = { action: "clipboardToast", reason: "non-X11 session — keystroke path locked" };
-  }
+    const ctx: DeliveryContext = {
+      text,
+      priorLive,
+      foreground: fg,
+      captured,
+      terminalVariantEnabled: termVariant,
+    };
 
-  console.log(`[INJECT] finalDecision=${finalDecision.action}${finalDecision.action === "clipboardToast" || finalDecision.action === "block" ? ` (${(finalDecision as { reason: string }).reason})` : ""}`);
-
-  // Execute keystroke based on decision (Invariant #18: never SetForegroundWindow).
-  let keystrokeOk = false;
-  if (finalDecision.action === "ctrlV") {
-    try {
-      if (process.platform === "darwin") {
-        await keyboard.pressKey(Key.LeftSuper, Key.V);
-        await keyboard.releaseKey(Key.LeftSuper, Key.V);
-        console.log("[INJECT] Cmd+V OK");
-      } else if (process.platform === "linux") {
-        // VTE terminals (GNOME Terminal, Tilix, Xfce, Terminator) use Ctrl+Shift+V;
-        // also accepted by Konsole, Alacritty, Kitty, WezTerm. Plain Ctrl+V for everything else.
-        if (classifyTarget(pasteTargetForeground) === "terminal") {
-          await keyboard.pressKey(Key.LeftControl, Key.LeftShift, Key.V);
-          await keyboard.releaseKey(Key.LeftControl, Key.LeftShift, Key.V);
-          console.log("[INJECT] Ctrl+Shift+V OK (Linux terminal)");
-        } else {
-          await keyboard.pressKey(Key.LeftControl, Key.V);
-          await keyboard.releaseKey(Key.LeftControl, Key.V);
-          console.log("[INJECT] Ctrl+V OK");
-        }
-      } else {
-        await keyboard.pressKey(Key.LeftControl, Key.V);
-        await keyboard.releaseKey(Key.LeftControl, Key.V);
-        console.log("[INJECT] Ctrl+V OK");
-      }
-      keystrokeOk = true;
-    } catch (err) {
-      console.error(`ERROR: paste keystroke failed — ${err instanceof Error ? err.message : String(err)}`);
-    }
-  } else if (finalDecision.action === "shiftInsert") {
-    try {
-      await keyboard.pressKey(Key.LeftShift, Key.Insert);
-      await keyboard.releaseKey(Key.LeftShift, Key.Insert);
-      keystrokeOk = true;
-      console.log("[INJECT] Shift+Insert OK");
-    } catch (err) {
-      console.error(`ERROR: Shift+Insert failed — ${err instanceof Error ? err.message : String(err)}`);
+    deliveryMethod = plan.primary.action;
+    delivered = await executeDelivery(plan.primary, ctx);
+    if (!delivered) {
+      deliveryMethod = plan.fallback.action;
+      delivered = await executeDelivery(plan.fallback, ctx);
     }
   }
-  // clipboardToast, block, or keystroke failure → transcript is already in clipboard
+
+  const injectMs = Math.round(performance.now() - injectT0);
+  console.log(`[INJECT] delivered=${delivered} method=${deliveryMethod} injectMs=${injectMs}`);
+  // Not delivered → transcript is still on the clipboard for manual paste.
+  liveInsertedText = "";
 
   const preview = text;
   console.log(`done. > "${preview.slice(0, 72)}${preview.length > 72 ? "..." : ""}"`);
   if (captureEndT0 !== undefined) {
     const pasteCompleteMs = Math.round(performance.now() - captureEndT0);
-    console.log(`[LATENCY] capture-end→paste-complete: ${pasteCompleteMs} ms`);
+    console.log(`[LATENCY] capture-end→paste-complete: ${pasteCompleteMs} ms method=${deliveryMethod} injectMs=${injectMs}`);
     appendLatencyLog({
       event: "paste_complete",
       voiceMode,
       pasteCompleteMs,
+      injectMs,
       textChars: text.length,
+      hadLiveInsert,
+      delivered,
+      deliveryMethod,
+      settleSource,
     });
   }
 
@@ -774,6 +1563,10 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
   appendTranscript(configDir, { text, timestamp: new Date().toISOString(), mode: transcriptionMode });
 
   flushCaptureDiag({ accepted: true, discardReason: null, text });
+
+  // Resume VAD after paste (latency starve fix).
+  vadEvents?.setOrtPaused(false);
+  vadEvents?.setCapturePaused(false);
 
   // Terminal state: loop to LISTENING (hands-free) or reset to IDLE (PTT).
   if (voiceMode === "handsFree") {
@@ -783,16 +1576,17 @@ async function runPipeline(wavBuffer: Buffer, voiceMode: "handsFree" | "ptt", ca
     pasteTargetHwnd = null;
   }
 
-  // Show transcript preview without stealing focus (Invariant #18 — showInactive only).
-  if (win) {
+  // LD4 — preview is not paste. Showing the transcript in SpeakFlow after a failed
+  // delivery reads as "it pasted into SpeakFlow", which is the exact failure this ships to fix.
+  if (win && shouldShowTranscriptPreview({ delivered, hadLiveInsert })) {
     suppressBlur = true;
     if (tray) positionWindowAboveTray(win, tray);
     win.showInactive();
     setTimeout(() => { suppressBlur = false; }, 400);
-    console.log("[UI] showInactive preview after paste");
+    console.log("[UI] showInactive preview after delivery");
+  } else if (!delivered) {
+    console.log("[UI] skip showInactive — text did not reach the target (clipboard has it)");
   }
-
-  void keystrokeOk; // consumed by logging above
 }
 
 // ---------------------------------------------------------------------------
@@ -839,6 +1633,8 @@ function registerHotkey(hotkey: HotkeyConfig): void {
 
     captureSession.markSpeechStart();
     transition("RECORDING");
+    attachStreamFramePump(captureSession);
+    beginDictationStream();
     console.log("[PTT] Recording...");
   });
 
@@ -874,13 +1670,16 @@ function registerHotkey(hotkey: HotkeyConfig): void {
       // PTT-only: stop capture (release mic) after taking the segment
       void captureSession.stop().catch(() => {});
       captureSession = null;
+      streamFrameListenerAttached = false;
     }
 
     const t0 = performance.now();
-    runPipeline(wav, pipelineMode, t0).catch((err: unknown) => {
-      console.error("FATAL: Unhandled exception escaped pipeline —", err);
-      flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
-      resetToIdle("Unexpected error");
+    void endDictationStream().then(() => {
+      runPipeline(wav, pipelineMode, t0).catch((err: unknown) => {
+        console.error("FATAL: Unhandled exception escaped pipeline —", err);
+        flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
+        resetToIdle("Unexpected error");
+      });
     });
   });
 }
@@ -1029,6 +1828,8 @@ function wireMuteHandler(): void {
     // Kill-switch: close mic device + stop resident engine (Invariant #19 / Q4 / §0 Q2)
     if (muteState.muted && captureSession) {
       stopCallAppPoll();
+      abortDictationStream();
+      streamFrameListenerAttached = false;
       vadEvents?.stop();
       vadEvents = null;
       void captureSession.stop().catch(() => {});
@@ -1680,6 +2481,7 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
         `Oracle SpeakFlow ready.\n` +
         `  API key: ${MASKED_KEY}\n` +
         `  Model:   ${liveConfig.value.model}\n` +
+        `  Finalize:${FINALIZE_MODEL} (speculative hangover kick)\n` +
         `  Voice:   ${mode}${mode === "handsFree" ? " (speak — no hotkey)" : ""}\n` +
         `  Hotkey:  ${formatHotkeyLabel(activeHotkey)}${mode === "handsFree" ? " (PTT fallback)" : " (hold to record, release to transcribe)"}\n`
       );
@@ -1706,6 +2508,12 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
     });
     tray = createTray(win);
     setupIpc();
+    // Warm Win32 hot host so first paste skips Add-Type cold start (#13).
+    if (process.platform === "win32") {
+      void hotGetForegroundAndAlive(null).catch(() => {
+        /* best-effort warm */
+      });
+    }
 
     // FR-M3-04: Watch for MCP tool-call notifications written by the headless
     // MCP process. fs.watch uses OS-level ReadDirectoryChangesW (Windows) /
@@ -1748,9 +2556,36 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
       startHotkeyHook();
       // Start continuous capture (hands-free armed from launch, or PTT-ready in ptt mode)
       if (isOk(liveConfig)) {
-        startContinuousMode().catch((err: unknown) =>
-          console.error("[STARTUP] continuous capture failed:", err)
-        );
+        startContinuousMode()
+          .then(() => {
+            // One-shot latency proof: SPEAKFLOW_SMOKE_WAV=<path> runs real settle+paste path (#13).
+            const smokeWav = process.env["SPEAKFLOW_SMOKE_WAV"]?.trim();
+            if (!smokeWav || !existsSync(smokeWav) || !isOk(liveConfig)) return;
+            const cfg = liveConfig.value;
+            const wav = readFileSync(smokeWav);
+            console.log(`[SMOKE] SPEAKFLOW_SMOKE_WAV pipeline start bytes=${wav.length}`);
+            const t0 = performance.now();
+            const searchDirs = [getBundledBinDir(), join(configDir, "models")];
+            const speculative = transcribeFinalize(
+              cfg.groqApiKey,
+              wav,
+              cfg.language,
+              cfg.transcriptionMode,
+              cfg.modelTier,
+              searchDirs,
+              activeEngineHandle ?? undefined
+            ).then((r) => {
+              if (!r.ok) return null;
+              const t = r.value.trim();
+              return t && !isLikelyWhisperHallucination(t) ? t : null;
+            });
+            return runPipeline(wav, "ptt", t0, undefined, null, speculative).finally(() => {
+              console.log("[SMOKE] pipeline finished");
+            });
+          })
+          .catch((err: unknown) =>
+            console.error("[STARTUP] continuous capture failed:", err)
+          );
       }
     }
 

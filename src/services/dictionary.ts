@@ -48,7 +48,8 @@ function validateDictionary(raw: unknown): Result<Dictionary, DictError> {
 function tryParseAndValidate(jsonStr: string): Result<Dictionary, DictError> {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonStr);
+    // PowerShell Set-Content -Encoding utf8 writes a BOM; JSON.parse rejects it.
+    parsed = JSON.parse(jsonStr.replace(/^\uFEFF/, ""));
   } catch (err) {
     return Err({ kind: "invalidJson", message: err instanceof Error ? err.message : String(err) });
   }
@@ -113,8 +114,10 @@ export const applyDictionary = (
         ? new RegExp(escapeRegex(entry.spoken), "gi")
         : new RegExp(`\\b${escapeRegex(entry.spoken)}\\b`, "gi");
 
-    if (pattern.test(result)) {
-      result = result.replace(pattern, entry.written);
+    // Always replace — never pattern.test() first with /g (lastIndex can skip matches).
+    const next = result.replace(pattern, entry.written);
+    if (next !== result) {
+      result = next;
       protectedTokens.push(entry.written);
     }
   }

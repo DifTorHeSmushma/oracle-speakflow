@@ -26,10 +26,10 @@ describe("captureDiag Phase 0 helpers", () => {
     expect(out.readInt16LE(0)).toBe(32767);
   });
 
-  it("resolveMicGain defaults to 20 and honors env override", () => {
+  it("resolveMicGain defaults to 2 and honors env override", () => {
     const prev = process.env["SPEAKFLOW_MIC_GAIN"];
     delete process.env["SPEAKFLOW_MIC_GAIN"];
-    expect(resolveMicGain()).toBe(20);
+    expect(resolveMicGain()).toBe(2);
     process.env["SPEAKFLOW_MIC_GAIN"] = "1.5";
     expect(resolveMicGain()).toBe(1.5);
     if (prev === undefined) delete process.env["SPEAKFLOW_MIC_GAIN"];
