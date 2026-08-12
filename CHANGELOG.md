@@ -5,7 +5,9 @@ All notable changes to oracle-speakflow will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
-- **Packaged Windows Groq worker:** Bundle `groqTranscribeWorker` with esbuild (embeds `groq-sdk`) and unpack the `.cjs` from asar. Before this, the installer set `SPEAKFLOW_GROQ_WORKER=1` but the worker could not resolve `groq-sdk` inside asar, silently fell back to main-thread Groq, and long dumps hit **Network timeout**. Worker is ON by default (`SPEAKFLOW_GROQ_WORKER=0` to force main-thread debug). Proof: `npm run proof:packaged-worker`.
+- **Packaged Windows Groq worker:** Bundle `groqTranscribeWorker` with esbuild (embeds `groq-sdk`) and unpack the `.cjs` from asar. Before this, the installer set `SPEAKFLOW_GROQ_WORKER=1` but the worker could not resolve `groq-sdk` inside asar, silently fell back to main-thread Groq, and long dumps hit **Network timeout**. Worker is ON by default (`SPEAKFLOW_GROQ_WORKER=0` to force main-thread debug). Proof: `npm run proof:packaged-worker`. Tracked in [#9](https://github.com/DifTorHeSmushma/oracle-speakflow/issues/9).
+- **Hands-free mic “deaf” after paste:** Always resume VAD `capturePaused` in `runPipeline` `finally` — early error/clipboard exits left UI on Listening while ignoring the mic.
+- **Prompt-echo paste spam:** Block Whisper echoing finalize-prompt fragments such as `Do not invent words or`; shorten `FINALIZE_PROMPT` so silence/noise cannot parrot it into Cursor.
 
 ### Added — Quantum Leap Wave 3 (2026-07-08)
 - **Voice settings UI:** Hands-free / PTT toggle, VAD sliders, terminal paste mode, kill-switch explainer
