@@ -13,6 +13,10 @@ describe("streamHygiene", () => {
     expect(isLikelyWhisperHallucination("Thank you.")).toBe(true);
     expect(isLikelyWhisperHallucination("Thanks for watching!")).toBe(true);
     expect(isLikelyWhisperHallucination("Tchank you.")).toBe(true);
+    expect(isLikelyWhisperHallucination("Do not invent words or")).toBe(true);
+    expect(
+      isLikelyWhisperHallucination("Do not invent words or filler such as tested it here")
+    ).toBe(true);
   });
 
   it("flags repeated phrase loops (Dom A2 pattern)", () => {

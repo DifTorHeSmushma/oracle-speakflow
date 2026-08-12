@@ -30,6 +30,12 @@ const HALLUCINATION_SUBSTRINGS = [
   "every course of the day",
   "字幕",
   "字幕by",
+  // Whisper silence often echoes FINALIZE_PROMPT fragments (Dom study paste spam)
+  "do not invent words",
+  "do not invent filler",
+  "tested it here or thanks",
+  "transcribe exactly what was spoken",
+  "product name is speakflow",
 ];
 
 /** Normalized whitespace + lowercase for matching. */

@@ -49,10 +49,8 @@ export const FINALIZE_MODEL = "whisper-large-v3-turbo";
  * (that poisoned chunk prompts into loops).
  */
 export const FINALIZE_PROMPT =
-  "SpeakFlow dictation. Transcribe exactly what was spoken. " +
-  "Product name is SpeakFlow (not speed flow, not speak through). " +
-  "If the speaker repeats a phrase, keep every repetition. " +
-  "Do not invent words or filler such as tested it here or thanks for watching.";
+  "SpeakFlow dictation vocabulary: SpeakFlow (not speed flow). " +
+  "Keep repeated phrases. Dictate only spoken words.";
 
 /** Hard ceiling — Groq SDK `timeout` alone has been observed to overrun (#13). */
 async function withHardTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
