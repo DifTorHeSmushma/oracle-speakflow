@@ -1175,6 +1175,42 @@ async function runPipeline(
     maybeRelisten();
     return;
   }
+
+  // Hands-free sets capturePaused=true at speech_end. EVERY exit must clear it or
+  // VAD stops processing frames while the UI still says "Listening" (fake waveform).
+  const resumeVadCapture = (): void => {
+    vadEvents?.setOrtPaused(false);
+    vadEvents?.setCapturePaused(false);
+  };
+
+  try {
+    await runPipelineBody(
+      wavBuffer,
+      voiceMode,
+      captureEndT0,
+      preferLiveText,
+      deepgramText,
+      speculativePromiseArg
+    );
+  } finally {
+    resumeVadCapture();
+  }
+}
+
+async function runPipelineBody(
+  wavBuffer: Buffer,
+  voiceMode: "handsFree" | "ptt",
+  captureEndT0?: number,
+  preferLiveText?: string,
+  deepgramText?: string | null,
+  speculativePromiseArg?: Promise<string | null> | null
+): Promise<void> {
+  if (!isOk(liveConfig)) {
+    console.error("[PIPELINE] no config — API key missing");
+    resetToIdle("API key not configured — tap the tray icon to set it");
+    maybeRelisten();
+    return;
+  }
   const { groqApiKey, model, language, transcriptionMode, modelTier, correction } = liveConfig.value;
   const searchDirs = [getBundledBinDir(), join(configDir, "models")];
 
@@ -1564,11 +1600,8 @@ async function runPipeline(
 
   flushCaptureDiag({ accepted: true, discardReason: null, text });
 
-  // Resume VAD after paste (latency starve fix).
-  vadEvents?.setOrtPaused(false);
-  vadEvents?.setCapturePaused(false);
-
   // Terminal state: loop to LISTENING (hands-free) or reset to IDLE (PTT).
+  // VAD capture resume is in runPipeline() finally — do not skip on early returns.
   if (voiceMode === "handsFree") {
     transition("LISTENING", { transcript: text });
   } else {
