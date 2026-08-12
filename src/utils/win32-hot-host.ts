@@ -4,7 +4,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, copyFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 type Pending = {
@@ -22,7 +22,11 @@ let bootPromise: Promise<void> | null = null;
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function resolveServerScript(): string {
-  const inDist = join(__dirname, "win32-hot-server.ps1");
+  const asarUnpacked = (p: string): string =>
+    p.includes(`${sep}app.asar${sep}`)
+      ? p.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`)
+      : p;
+  const inDist = asarUnpacked(join(__dirname, "win32-hot-server.ps1"));
   if (existsSync(inDist)) return inDist;
   const inSrc = join(__dirname, "../../src/utils/win32-hot-server.ps1");
   if (existsSync(inSrc)) {

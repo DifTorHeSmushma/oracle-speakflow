@@ -362,6 +362,7 @@ See `docs/DESIGN/MILESTONE_3_PRD.md`.
 | Local mode fails (installer) | Settings → Engine → Local; ensure **Fast** tier shows available; click **Save** |
 | Local mode fails (dev clone) | Add `whisper-cli.exe` + model to `resources/bin/` or use **Download** for tiers |
 | Old installed `.exe` shows stale UI | Uninstall `%LOCALAPPDATA%\Programs\Oracle SpeakFlow\`; use dev launch |
+| Packaged dumps slow / **Network timeout** | Rebuild after the bundled Groq worker fix (`groqTranscribeWorker.cjs`); confirm stderr shows `via=worker` (not `Cannot find package 'groq-sdk'`). See GitHub issue on packaged worker asar. |
 
 ## Roadmap
 

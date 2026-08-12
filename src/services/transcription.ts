@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, unlinkSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,11 @@ import { transcribeWarm, type EngineHandle } from "./localEngine.js";
 import type { TranscriptionMode, ModelTier } from "../types/ipc.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const GROQ_WORKER_PATH = join(__dirname, "groqTranscribeWorker.js");
+const asarUnpacked = (p: string): string =>
+  p.includes(`${sep}app.asar${sep}`)
+    ? p.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`)
+    : p;
+const GROQ_WORKER_PATH = asarUnpacked(join(__dirname, "groqTranscribeWorker.cjs"));
 
 export type { TranscriptionMode };
 
@@ -443,10 +447,9 @@ export const transcribeFinalize = async (
   if (mode === "local") {
     return transcribeLocal(audioBuffer, tier, language, searchDirs, engineHandle);
   }
-  // Prefer main-thread HTTP while VAD ORT is paused (#13). Spawning a new
-  // worker per utterance was flaky (14–20s timeouts) under Electron load.
-  // SPEAKFLOW_GROQ_WORKER=1 re-enables the worker path for experiments.
-  if (process.env["SPEAKFLOW_GROQ_WORKER"]?.trim() === "1") {
+  // Packaged Electron: worker must win by default. SPEAKFLOW_GROQ_WORKER=0 forces
+  // main-thread HTTP (debug only). Unset / any other value → worker (Aug 8 Dom baseline).
+  if (process.env["SPEAKFLOW_GROQ_WORKER"]?.trim() !== "0") {
     return transcribeRemoteWorker(
       apiKey,
       audioBuffer,

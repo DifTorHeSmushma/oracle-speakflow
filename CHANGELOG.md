@@ -4,6 +4,9 @@ All notable changes to oracle-speakflow will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Packaged Windows Groq worker:** Bundle `groqTranscribeWorker` with esbuild (embeds `groq-sdk`) and unpack the `.cjs` from asar. Before this, the installer set `SPEAKFLOW_GROQ_WORKER=1` but the worker could not resolve `groq-sdk` inside asar, silently fell back to main-thread Groq, and long dumps hit **Network timeout**. Worker is ON by default (`SPEAKFLOW_GROQ_WORKER=0` to force main-thread debug). Proof: `npm run proof:packaged-worker`.
+
 ### Added — Quantum Leap Wave 3 (2026-07-08)
 - **Voice settings UI:** Hands-free / PTT toggle, VAD sliders, terminal paste mode, kill-switch explainer
 - **Dictionary panel:** CRUD, enable/disable, JSON import/export (`dictionary.json` in userData)

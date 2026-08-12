@@ -166,28 +166,42 @@ describe("transcription service", () => {
   });
 
   it("finalize path uses turbo settle model, short timeout, and vocabulary prompt (#12/#13)", async () => {
-    const Groq = (await import("groq-sdk")).default as unknown as ReturnType<typeof vi.fn>;
-    mockCreate.mockResolvedValueOnce("SpeakFlow test");
-    await transcribeFinalize(apiKey, dummyBuffer, "en");
-    expect(Groq).toHaveBeenCalledWith(
-      expect.objectContaining({ apiKey, timeout: CLOUD_FINALIZE_TIMEOUT_MS })
-    );
-    expect(FINALIZE_MODEL).toBe("whisper-large-v3-turbo");
-    expect(mockCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: FINALIZE_MODEL,
-        temperature: 0,
-        prompt: expect.stringContaining("SpeakFlow"),
-      })
-    );
+    const prev = process.env["SPEAKFLOW_GROQ_WORKER"];
+    process.env["SPEAKFLOW_GROQ_WORKER"] = "0"; // unit-test main-thread path (mock Groq)
+    try {
+      const Groq = (await import("groq-sdk")).default as unknown as ReturnType<typeof vi.fn>;
+      mockCreate.mockResolvedValueOnce("SpeakFlow test");
+      await transcribeFinalize(apiKey, dummyBuffer, "en");
+      expect(Groq).toHaveBeenCalledWith(
+        expect.objectContaining({ apiKey, timeout: CLOUD_FINALIZE_TIMEOUT_MS })
+      );
+      expect(FINALIZE_MODEL).toBe("whisper-large-v3-turbo");
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: FINALIZE_MODEL,
+          temperature: 0,
+          prompt: expect.stringContaining("SpeakFlow"),
+        })
+      );
+    } finally {
+      if (prev === undefined) delete process.env["SPEAKFLOW_GROQ_WORKER"];
+      else process.env["SPEAKFLOW_GROQ_WORKER"] = prev;
+    }
   });
 
   it("finalize does not retry on timeout (#12 latency floor)", async () => {
-    const networkErr = Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
-    mockCreate.mockRejectedValue(networkErr);
-    const result = await transcribeFinalize(apiKey, dummyBuffer, "en");
-    expect(result.ok).toBe(false);
-    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const prev = process.env["SPEAKFLOW_GROQ_WORKER"];
+    process.env["SPEAKFLOW_GROQ_WORKER"] = "0";
+    try {
+      const networkErr = Object.assign(new Error("timeout"), { code: "ETIMEDOUT" });
+      mockCreate.mockRejectedValue(networkErr);
+      const result = await transcribeFinalize(apiKey, dummyBuffer, "en");
+      expect(result.ok).toBe(false);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prev === undefined) delete process.env["SPEAKFLOW_GROQ_WORKER"];
+      else process.env["SPEAKFLOW_GROQ_WORKER"] = prev;
+    }
   });
 
   // ---- Gate G-D4: aborted requests are typed as timeouts, not opaque API errors ----

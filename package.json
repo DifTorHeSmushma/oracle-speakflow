@@ -6,7 +6,8 @@
   "main": "dist/electron-main.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && node -e \"require('fs').copyFileSync('src/utils/win32-hot-server.ps1','dist/utils/win32-hot-server.ps1')\"",
+    "build:worker": "esbuild src/services/groqTranscribeWorker.ts --bundle --platform=node --format=cjs --outfile=dist/services/groqTranscribeWorker.cjs",
+    "build": "tsc && npm run build:worker && node -e \"require('fs').copyFileSync('src/utils/win32-hot-server.ps1','dist/utils/win32-hot-server.ps1')\"",
     "start": "node dist/index.js",
     "build:ui": "vite build",
     "start:app": "npm run build && npm run build:ui && electron dist/electron-main.js",
@@ -18,6 +19,8 @@
     "check:delivery:electron": "tsx scripts/gate-electron-delivery.ts",
     "check:wer": "tsx scripts/gate-wer-fixtures.ts",
     "check:latency-overlap": "node scripts/check-latency-overlap.mjs",
+    "proof:packaged-worker": "node scripts/proof-packaged-worker.mjs",
+    "proof:domenic-latency": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/latency-proof-domenic-study.ps1",
     "validate:gates": "node scripts/gate-report.mjs",
     "test": "vitest run --config vitest.config.ts",
     "test:ui": "vitest run --config vitest.ui.config.ts",
@@ -45,6 +48,7 @@
     "clsx": "^2.1.1",
     "electron": "^41.3.0",
     "electron-builder": "^26.8.1",
+    "esbuild": "^0.27.7",
     "jsdom": "^29.1.0",
     "playwright": "^1.59.1",
     "svelte": "^4.2.20",
@@ -73,12 +77,15 @@
       "!**/*.map"
     ],
     "asarUnpack": [
+      "dist/services/groqTranscribeWorker.cjs",
+      "dist/utils/win32-hot-server.ps1",
       "node_modules/clipboardy/fallbacks/**",
       "node_modules/@nut-tree-fork/libnut-win32/build/Release/**",
       "node_modules/@nut-tree-fork/libnut-linux/build/Release/**",
       "node_modules/uiohook-napi/prebuilds/**",
       "node_modules/onnxruntime-node/bin/**"
     ],
+    "asar": true,
     "extraResources": [
       {
         "from": "resources/bin",
