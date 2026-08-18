@@ -33,6 +33,8 @@ const HALLUCINATION_SUBSTRINGS = [
   // Whisper silence often echoes FINALIZE_PROMPT fragments (Dom study paste spam)
   "do not invent words",
   "do not invent filler",
+  "dictate only spoken words",
+  "verbatim transcript only",
   "tested it here or thanks",
   "transcribe exactly what was spoken",
   "product name is speakflow",

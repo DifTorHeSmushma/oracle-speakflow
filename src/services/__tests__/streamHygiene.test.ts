@@ -14,6 +14,8 @@ describe("streamHygiene", () => {
     expect(isLikelyWhisperHallucination("Thanks for watching!")).toBe(true);
     expect(isLikelyWhisperHallucination("Tchank you.")).toBe(true);
     expect(isLikelyWhisperHallucination("Do not invent words or")).toBe(true);
+    expect(isLikelyWhisperHallucination("Dictate only spoken words")).toBe(true);
+    expect(isLikelyWhisperHallucination("Verbatim transcript only")).toBe(true);
     expect(
       isLikelyWhisperHallucination("Do not invent words or filler such as tested it here")
     ).toBe(true);
