@@ -13,12 +13,13 @@ import {
   transcribeChunk,
   transcribeFinalize,
   FINALIZE_MODEL,
+  type TranscriptionError,
 } from "./services/transcription.js";
 import { appendTranscript, readHistory } from "./services/transcript-store.js";
 import { keyboard, Key } from "@nut-tree-fork/nut-js";
 // Global: nut-js default autoDelayMs (~300) made every Ctrl+V multi-second (#13).
 keyboard.config.autoDelayMs = 0;
-import { isErr, isOk, Ok, Err } from "./utils/result.js";
+import { isErr, isOk, Ok, Err, type Result } from "./utils/result.js";
 import { DEFAULT_HOTKEY, formatHotkeyLabel, HOTKEY_CONFIG_VERSION } from "./utils/defaultHotkey.js";
 import { getForegroundInfo, nativeHandleEquals, getForegroundAndCheckWindow, isDarwinSpeakFlowApp, darwinForegroundMatches, isLinuxSpeakFlowWindow, linuxForegroundMatches, type ForegroundInfo } from "./utils/win32-window.js";
 import {
@@ -119,7 +120,7 @@ let liveInsertedText = "";
 let deepgramSession: DeepgramLiveSession | null = null;
 /** Speculative Groq finalize kicked mid-hangover so paste need not wait full RTT. */
 let speculativeGen = 0;
-let speculativePromise: Promise<string | null> | null = null;
+let speculativePromise: Promise<Result<string, TranscriptionError> | null> | null = null;
 let speculativeWavBytes = 0;
 /** Session speech frames at kick — compare to speechFrameCount (not padded WAV bytes). */
 let speculativeSessionFrames = 0;
@@ -785,13 +786,16 @@ function kickSpeculativeFinalizeWithWav(wav: Buffer, sessionFrames: number): voi
     activeEngineHandle ?? undefined
   ).then((r) => {
     if (gen !== speculativeGen) return null;
-    if (!r.ok) return null;
+    if (!r.ok) {
+      console.log(`[SPEC] speculative failed kind=${r.error.kind}`);
+      return r;
+    }
     const t = r.value.trim();
     if (!t || isLikelyWhisperHallucination(t)) return null;
     console.log(`[SPEC] speculative ready chars=${t.length}`);
     // No rolling refresh here — a second Groq call stacked on the main thread
     // and pushed Dom back to ~12–18s. Silence-hint owns the near-final WAV.
-    return t;
+    return Ok(t);
   });
 }
 
@@ -1167,7 +1171,7 @@ async function runPipeline(
   captureEndT0?: number,
   preferLiveText?: string,
   deepgramText?: string | null,
-  speculativePromiseArg?: Promise<string | null> | null
+  speculativePromiseArg?: Promise<Result<string, TranscriptionError> | null> | null
 ): Promise<void> {
   if (!isOk(liveConfig)) {
     console.error("[PIPELINE] no config — API key missing");
@@ -1203,7 +1207,7 @@ async function runPipelineBody(
   captureEndT0?: number,
   preferLiveText?: string,
   deepgramText?: string | null,
-  speculativePromiseArg?: Promise<string | null> | null
+  speculativePromiseArg?: Promise<Result<string, TranscriptionError> | null> | null
 ): Promise<void> {
   if (!isOk(liveConfig)) {
     console.error("[PIPELINE] no config — API key missing");
@@ -1265,12 +1269,52 @@ async function runPipelineBody(
     specWaitMs = Math.round(performance.now() - waitT0);
     finalizeModelUsed = FINALIZE_MODEL;
     // Final-WAV kick is the settle source (hangover peeks disabled). Trust it.
-    if (early && !isLikelyWhisperHallucination(early)) {
-      textResult = Ok(early);
-      settleSource = "speculative";
-      console.log(
-        `[TRANSCRIBE] settle=speculative chars=${early.length} specWaitMs=${specWaitMs}`
-      );
+    if (early?.ok) {
+      const t = early.value.trim();
+      if (!t || isLikelyWhisperHallucination(t)) {
+        const live = liveFallback();
+        if (live) {
+          textResult = Ok(live);
+          settleSource = "live-fallback";
+          console.log(
+            `[TRANSCRIBE] settle=live-fallback chars=${live.length} (speculative hallucination; specWaitMs=${specWaitMs})`
+          );
+        } else {
+          textResult = await transcribeFinalize(
+            groqApiKey, wavForAsr, language, transcriptionMode,
+            modelTier, searchDirs, activeEngineHandle ?? undefined,
+          );
+          settleSource = "groq";
+          console.log(
+            textResult.ok
+              ? `[TRANSCRIBE] settle=groq-finalize chars=${textResult.value.length} specWaitMs=${specWaitMs}`
+              : `[TRANSCRIBE] finalize miss (specWaitMs=${specWaitMs})`
+          );
+        }
+      } else {
+        textResult = Ok(t);
+        settleSource = "speculative";
+        console.log(
+          `[TRANSCRIBE] settle=speculative chars=${t.length} specWaitMs=${specWaitMs}`
+        );
+      }
+    } else if (early && !early.ok) {
+      const live = liveFallback();
+      if (live) {
+        textResult = Ok(live);
+        settleSource = "live-fallback";
+        console.log(
+          `[TRANSCRIBE] settle=live-fallback chars=${live.length} (speculative ${early.error.kind}; specWaitMs=${specWaitMs})`
+        );
+      } else {
+        // Do not run a second full finalize on the same WAV after already waiting on
+        // a near-final speculative request; that recreates the 40–60s double-RTT bug.
+        textResult = early;
+        settleSource = "speculative";
+        console.log(
+          `[TRANSCRIBE] settle=speculative-error kind=${early.error.kind} specWaitMs=${specWaitMs}`
+        );
+      }
     } else {
       const live = liveFallback();
       if (live) {
@@ -2610,9 +2654,9 @@ if (process.env["TEST_MODE"] !== "true" && !app.requestSingleInstanceLock()) {
               searchDirs,
               activeEngineHandle ?? undefined
             ).then((r) => {
-              if (!r.ok) return null;
+              if (!r.ok) return r;
               const t = r.value.trim();
-              return t && !isLikelyWhisperHallucination(t) ? t : null;
+              return t && !isLikelyWhisperHallucination(t) ? Ok(t) : null;
             });
             return runPipeline(wav, "ptt", t0, undefined, null, speculative).finally(() => {
               console.log("[SMOKE] pipeline finished");
