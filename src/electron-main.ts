@@ -1641,9 +1641,11 @@ function registerHotkey(hotkey: HotkeyConfig): void {
       (!hotkey.alt || e.altKey);
     if (!modifiersMatch) return;
 
-    // Hands-free: PTT is fallback when LISTENING (Spec degradation rule — never button-only).
+    // Hands-free: PTT is fallback when LISTENING.
+    // When muted in hands-free, state is IDLE (captureSession null) — allow PTT as
+    // manual override so F8 still works while mic-muted. Reject only mid-pipeline states.
     const hf = isOk(liveConfig) && liveConfig.value.voiceMode === "handsFree";
-    if (hf && state !== "LISTENING") return;
+    if (hf && state !== "LISTENING" && state !== "IDLE") return;
 
     // PTT-only mode — Invariant #6: silently drop if not IDLE
     if (!hf && state !== "IDLE") return;
