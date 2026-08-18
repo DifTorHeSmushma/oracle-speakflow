@@ -474,6 +474,7 @@ type DeliveryContext = {
   foreground: ForegroundInfo | null;
   captured: CapturedTarget;
   terminalVariantEnabled: boolean;
+  allowDeliveryWhileMuted: boolean;
 };
 
 /**
@@ -489,7 +490,7 @@ async function executeDelivery(action: DeliveryAction, ctx: DeliveryContext): Pr
 
   // Invariant #19 — the plan was made before this action ran, and the yield path sleeps.
   // Re-read mute immediately before anything reaches a window.
-  if (getMuteState().muted) {
+  if (getMuteState().muted && !ctx.allowDeliveryWhileMuted) {
     console.log("[INJECT] muted at delivery time — nothing sent");
     return false;
   }
@@ -586,7 +587,7 @@ async function executeDelivery(action: DeliveryAction, ctx: DeliveryContext): Pr
     capturedForeground: ctx.captured?.info ?? null,
     foreground: fg1,
     ownHwndEquals: false,
-    muted: getMuteState().muted,
+    muted: getMuteState().muted && !ctx.allowDeliveryWhileMuted,
     terminalVariantEnabled: ctx.terminalVariantEnabled,
     classifier: classifyTarget,
   });
@@ -1171,7 +1172,8 @@ async function runPipeline(
   captureEndT0?: number,
   preferLiveText?: string,
   deepgramText?: string | null,
-  speculativePromiseArg?: Promise<Result<string, TranscriptionError> | null> | null
+  speculativePromiseArg?: Promise<Result<string, TranscriptionError> | null> | null,
+  allowDeliveryWhileMuted = false
 ): Promise<void> {
   if (!isOk(liveConfig)) {
     console.error("[PIPELINE] no config — API key missing");
@@ -1194,7 +1196,8 @@ async function runPipeline(
       captureEndT0,
       preferLiveText,
       deepgramText,
-      speculativePromiseArg
+      speculativePromiseArg,
+      allowDeliveryWhileMuted
     );
   } finally {
     resumeVadCapture();
@@ -1207,7 +1210,8 @@ async function runPipelineBody(
   captureEndT0?: number,
   preferLiveText?: string,
   deepgramText?: string | null,
-  speculativePromiseArg?: Promise<Result<string, TranscriptionError> | null> | null
+  speculativePromiseArg?: Promise<Result<string, TranscriptionError> | null> | null,
+  allowDeliveryWhileMuted = false
 ): Promise<void> {
   if (!isOk(liveConfig)) {
     console.error("[PIPELINE] no config — API key missing");
@@ -1517,6 +1521,7 @@ async function runPipelineBody(
 
   const ownHwndBuf = win?.getNativeWindowHandle() ?? Buffer.alloc(0);
   const muteState = getMuteState();
+  const effectiveMuted = muteState.muted && !allowDeliveryWhileMuted;
   const termVariant = isOk(liveConfig) ? (liveConfig.value.terminalVariantEnabled ?? false) : false;
 
   // ---------------------------------------------------------------------------
@@ -1546,7 +1551,7 @@ async function runPipelineBody(
   } else if (
     process.platform === "win32" &&
     captured?.info?.hwnd &&
-    !muteState.muted
+    !effectiveMuted
   ) {
     // Fast path for Dom daily Cursor use: skip cold PowerShell foreground probes.
     // Captured HWND at speech_end is delivery truth (LD1) — restore + Ctrl+V.
@@ -1557,6 +1562,7 @@ async function runPipelineBody(
       foreground: captured.info,
       captured,
       terminalVariantEnabled: termVariant,
+      allowDeliveryWhileMuted,
     };
     deliveryMethod = "restoreAndKeystroke";
     delivered = await executeDelivery(
@@ -1584,7 +1590,7 @@ async function runPipelineBody(
     const ownHwndEquals = isOwnWindowForeground(fg, ownHwndBuf);
 
     const plan = planDelivery({
-      muted: muteState.muted,
+      muted: effectiveMuted,
       captured,
       capturedAlive,
       foreground: fg,
@@ -1606,6 +1612,7 @@ async function runPipelineBody(
       foreground: fg,
       captured,
       terminalVariantEnabled: termVariant,
+      allowDeliveryWhileMuted,
     };
 
     deliveryMethod = plan.primary.action;
@@ -1732,7 +1739,8 @@ function registerHotkey(hotkey: HotkeyConfig): void {
     const wav = detailed.gainedWav;
     const health = captureSession.getHealth();
     const hf = isOk(liveConfig) && liveConfig.value.voiceMode === "handsFree";
-    const pipelineMode = hf ? "handsFree" : "ptt";
+    const mutedPttOverride = hf && getMuteState().muted;
+    const pipelineMode = !hf || mutedPttOverride ? "ptt" : "handsFree";
     if (isCaptureDiagEnabled()) {
       pendingCaptureDiag = {
         utteranceId: newUtteranceId(),
@@ -1754,7 +1762,7 @@ function registerHotkey(hotkey: HotkeyConfig): void {
 
     const t0 = performance.now();
     void endDictationStream().then(() => {
-      runPipeline(wav, pipelineMode, t0).catch((err: unknown) => {
+      runPipeline(wav, pipelineMode, t0, undefined, null, null, mutedPttOverride).catch((err: unknown) => {
         console.error("FATAL: Unhandled exception escaped pipeline —", err);
         flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
         resetToIdle("Unexpected error");
