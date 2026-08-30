@@ -12,7 +12,9 @@ import {
   transcribe,
   transcribeChunk,
   transcribeFinalize,
+  transcribeFinalizeLong,
   FINALIZE_MODEL,
+  FINALIZE_CHUNK_SEC,
   type TranscriptionError,
 } from "./services/transcription.js";
 import { appendTranscript, readHistory } from "./services/transcript-store.js";
@@ -1243,18 +1245,42 @@ async function runPipelineBody(
 
   console.log("transcribing...");
   const transcribeT0 = performance.now();
-  const FINALIZE_MAX_SEC = 28;
+  /** Single-request ceiling for short/speculative settles. Longer F8 dumps use chunked finalize. */
+  const FINALIZE_MAX_SEC = FINALIZE_CHUNK_SEC;
   const rawAudioSec = Math.round(((wavBuffer.length - 44) / 32000) * 100) / 100;
-  const wavForAsr =
-    rawAudioSec > FINALIZE_MAX_SEC ? trimWavToMaxSec(wavBuffer, FINALIZE_MAX_SEC) : wavBuffer;
-  const audioSec = Math.round(((wavForAsr.length - 44) / 32000) * 100) / 100;
-  if (wavForAsr !== wavBuffer) {
-    console.log(`[TRANSCRIBE] trimmed finalize wav ${rawAudioSec}s → ${audioSec}s`);
+  const useChunkedFinalize = rawAudioSec > FINALIZE_MAX_SEC;
+  const audioSec = rawAudioSec;
+  if (useChunkedFinalize) {
+    console.log(
+      `[TRANSCRIBE] long dump rawSec=${rawAudioSec} — chunked finalize (no trailing trim)`
+    );
   }
+
+  const runFinalize = () =>
+    useChunkedFinalize
+      ? transcribeFinalizeLong(
+          groqApiKey,
+          wavBuffer,
+          language,
+          transcriptionMode,
+          modelTier,
+          searchDirs,
+          activeEngineHandle ?? undefined
+        )
+      : transcribeFinalize(
+          groqApiKey,
+          wavBuffer,
+          language,
+          transcriptionMode,
+          modelTier,
+          searchDirs,
+          activeEngineHandle ?? undefined
+        );
 
   /** Deepgram finals are settle truth when present (#8).
    * Issue #13: await the in-flight speculative promise (hangover or speech_end kick)
-   * up to CLOUD_FINALIZE_TIMEOUT — never stack a second Groq finalize on the same WAV. */
+   * up to CLOUD_FINALIZE_TIMEOUT — never stack a second Groq finalize on the same WAV.
+   * Long dumps (F8 brain dumps): speculative only saw a trailing peek — always chunk the full WAV. */
   let textResult: Awaited<ReturnType<typeof transcribe>>;
   let settleSource: "deepgram" | "speculative" | "groq" | "live-fallback" = "groq";
   let specWaitMs = 0;
@@ -1265,6 +1291,15 @@ async function runPipelineBody(
     textResult = Ok(dg);
     settleSource = "deepgram";
     console.log(`[TRANSCRIBE] settle=deepgram chars=${dg.length}`);
+  } else if (useChunkedFinalize) {
+    finalizeModelUsed = FINALIZE_MODEL;
+    textResult = await runFinalize();
+    settleSource = "groq";
+    console.log(
+      textResult.ok
+        ? `[TRANSCRIBE] settle=groq-chunked chars=${textResult.value.length} rawSec=${rawAudioSec}`
+        : `[TRANSCRIBE] chunked finalize miss rawSec=${rawAudioSec}`
+    );
   } else if (speculativePromiseArg) {
     // Await the in-flight hangover/speech_end kick only — timeout lives inside
     // transcribeFinalize. A second shorter race was killing live mic settles at ~3s.
@@ -1284,10 +1319,7 @@ async function runPipelineBody(
             `[TRANSCRIBE] settle=live-fallback chars=${live.length} (speculative hallucination; specWaitMs=${specWaitMs})`
           );
         } else {
-          textResult = await transcribeFinalize(
-            groqApiKey, wavForAsr, language, transcriptionMode,
-            modelTier, searchDirs, activeEngineHandle ?? undefined,
-          );
+          textResult = await runFinalize();
           settleSource = "groq";
           console.log(
             textResult.ok
@@ -1329,10 +1361,7 @@ async function runPipelineBody(
         );
       } else {
         // One more finalize on the same final WAV if the in-flight kick failed.
-        textResult = await transcribeFinalize(
-          groqApiKey, wavForAsr, language, transcriptionMode,
-          modelTier, searchDirs, activeEngineHandle ?? undefined,
-        );
+        textResult = await runFinalize();
         settleSource = "groq";
         console.log(
           textResult.ok
@@ -1343,10 +1372,7 @@ async function runPipelineBody(
     }
   } else {
     finalizeModelUsed = FINALIZE_MODEL;
-    textResult = await transcribeFinalize(
-      groqApiKey, wavForAsr, language, transcriptionMode,
-      modelTier, searchDirs, activeEngineHandle ?? undefined,
-    );
+    textResult = await runFinalize();
   }
 
   const transcribeWallMs = Math.round(performance.now() - transcribeT0);
@@ -1361,7 +1387,7 @@ async function runPipelineBody(
     finalizeModel: finalizeModelUsed,
     audioSec,
     rawAudioSec,
-    wavBytes: wavForAsr.length,
+    wavBytes: wavBuffer.length,
     transcribeWallMs,
     specWaitMs,
     ok: textResult.ok,

@@ -10,6 +10,7 @@ import { Result, Ok, Err } from "../utils/result.js";
 import { getBinaryPath } from "../utils/binaryPath.js";
 import { resolveTierModel, TIER_LADDER } from "./modelRegistry.js";
 import { transcribeWarm, type EngineHandle } from "./localEngine.js";
+import { chunkWavBySec } from "./capture.js";
 import type { TranscriptionMode, ModelTier } from "../types/ipc.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +40,8 @@ export const CLOUD_TRANSCRIBE_TIMEOUT_MS = 25_000;
  * a 4s hard kill produced networkTimeout + zero paste (#13 HITL). No retry.
  */
 export const CLOUD_FINALIZE_TIMEOUT_MS = 20_000;
+/** Per-chunk ceiling for long F8/PTT dumps (keeps Groq under timeout without dropping the head). */
+export const FINALIZE_CHUNK_SEC = 25;
 /**
  * Speculative/settle model — turbo RTT so last-word→paste can hit ≤5s (issue #13).
  * Keep FINALIZE_PROMPT + temperature 0 for fidelity; large-v3 blew past 4s on Dom's path.
@@ -462,6 +465,48 @@ export const transcribeFinalize = async (
     timeoutMs: CLOUD_FINALIZE_TIMEOUT_MS,
     retryAttempts: 0,
   });
+};
+
+/**
+ * Long F8/PTT brain dumps: transcribe chronological chunks and stitch.
+ * Replaces trailing trim (which dropped everything before the last ~28s).
+ */
+export const transcribeFinalizeLong = async (
+  apiKey: string,
+  audioBuffer: Buffer,
+  language: string,
+  mode: TranscriptionMode = "remote",
+  tier: ModelTier = "fast",
+  searchDirs?: string[],
+  engineHandle?: EngineHandle,
+): Promise<Result<string, TranscriptionError>> => {
+  const chunks = chunkWavBySec(audioBuffer, FINALIZE_CHUNK_SEC);
+  if (chunks.length <= 1) {
+    return transcribeFinalize(apiKey, audioBuffer, language, mode, tier, searchDirs, engineHandle);
+  }
+
+  process.stderr.write(
+    `[LATENCY] long-finalize chunks=${chunks.length} bytes=${audioBuffer.length} chunkSec=${FINALIZE_CHUNK_SEC}\n`
+  );
+
+  const parts: string[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    if (!chunk) continue;
+    const r = await transcribeFinalize(apiKey, chunk, language, mode, tier, searchDirs, engineHandle);
+    if (!r.ok) {
+      if (parts.length === 0) return r;
+      process.stderr.write(
+        `[LATENCY] long-finalize chunk ${i + 1}/${chunks.length} failed (${r.error.kind}) — keeping ${parts.length} prior chunk(s)\n`
+      );
+      break;
+    }
+    const t = r.value.trim();
+    if (t) parts.push(t);
+  }
+
+  if (parts.length === 0) return Err({ kind: "emptyTranscription" });
+  return Ok(parts.join(" "));
 };
 
 /** Phase-1 live-insert chunk helper (issue #6). Always remote; keeps turbo for latency. */

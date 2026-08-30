@@ -154,6 +154,28 @@ export function trimWavToMaxSec(wav: Buffer, maxSec: number): Buffer {
   return buildWavBuffer(wav.subarray(wav.length - maxPcmBytes));
 }
 
+/**
+ * Split a full-session WAV into chronological chunks (no dropped head).
+ * Used for F8/PTT brain dumps: trailing trim was keeping only the last ~28s.
+ */
+export function chunkWavBySec(wav: Buffer, chunkSec: number): Buffer[] {
+  if (wav.length <= 44 || chunkSec <= 0) return [wav];
+  const pcm = wav.subarray(44);
+  const chunkBytes = Math.floor(chunkSec * SAMPLE_RATE) * 2;
+  if (pcm.length <= chunkBytes) return [wav];
+
+  const minTailBytes = SAMPLE_RATE; // 0.5s of s16le mono — absorb into prior chunk
+  const out: Buffer[] = [];
+  for (let off = 0; off < pcm.length; ) {
+    let end = Math.min(off + chunkBytes, pcm.length);
+    const leftover = pcm.length - end;
+    if (leftover > 0 && leftover < minTailBytes) end = pcm.length;
+    out.push(buildWavBuffer(pcm.subarray(off, end)));
+    off = end;
+  }
+  return out.length > 0 ? out : [wav];
+}
+
 function resolveFFmpeg(): string {
   const bundled = getBinaryPath(resolveBundledBinaryName("ffmpeg"));
   if (existsSync(bundled)) return bundled;
