@@ -42,6 +42,8 @@ export const CLOUD_TRANSCRIBE_TIMEOUT_MS = 25_000;
 export const CLOUD_FINALIZE_TIMEOUT_MS = 20_000;
 /** Per-chunk ceiling for long F8/PTT dumps (keeps Groq under timeout without dropping the head). */
 export const FINALIZE_CHUNK_SEC = 25;
+/** Overlap between long-dump chunks so boundary words are not lost on stitch. */
+export const FINALIZE_CHUNK_OVERLAP_SEC = 1;
 /**
  * Speculative/settle model — turbo RTT so last-word→paste can hit ≤5s (issue #13).
  * Keep FINALIZE_PROMPT + temperature 0 for fidelity; large-v3 blew past 4s on Dom's path.
@@ -480,16 +482,17 @@ export const transcribeFinalizeLong = async (
   searchDirs?: string[],
   engineHandle?: EngineHandle,
 ): Promise<Result<string, TranscriptionError>> => {
-  const chunks = chunkWavBySec(audioBuffer, FINALIZE_CHUNK_SEC);
+  const chunks = chunkWavBySec(audioBuffer, FINALIZE_CHUNK_SEC, FINALIZE_CHUNK_OVERLAP_SEC);
   if (chunks.length <= 1) {
     return transcribeFinalize(apiKey, audioBuffer, language, mode, tier, searchDirs, engineHandle);
   }
 
   process.stderr.write(
-    `[LATENCY] long-finalize chunks=${chunks.length} bytes=${audioBuffer.length} chunkSec=${FINALIZE_CHUNK_SEC}\n`
+    `[LATENCY] long-finalize chunks=${chunks.length} bytes=${audioBuffer.length} chunkSec=${FINALIZE_CHUNK_SEC} overlapSec=${FINALIZE_CHUNK_OVERLAP_SEC}\n`
   );
 
   const parts: string[] = [];
+  const chunkChars: number[] = [];
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     if (!chunk) continue;
@@ -497,15 +500,24 @@ export const transcribeFinalizeLong = async (
     if (!r.ok) {
       if (parts.length === 0) return r;
       process.stderr.write(
-        `[LATENCY] long-finalize chunk ${i + 1}/${chunks.length} failed (${r.error.kind}) — keeping ${parts.length} prior chunk(s)\n`
+        `[LATENCY] long-finalize chunk ${i + 1}/${chunks.length} failed (${r.error.kind}) — keeping ${parts.length} prior chunk(s) chunkChars=${JSON.stringify(chunkChars)}\n`
       );
       break;
     }
     const t = r.value.trim();
+    chunkChars.push(t.length);
+    process.stderr.write(
+      `[LATENCY] long-finalize chunk ${i + 1}/${chunks.length} chars=${t.length}\n`
+    );
     if (t) parts.push(t);
   }
 
   if (parts.length === 0) return Err({ kind: "emptyTranscription" });
+  if (chunkChars[0] === 0 && chunkChars.some((n) => n > 0)) {
+    process.stderr.write(
+      `[LATENCY] long-finalize WARN empty-head-chunk chunkChars=${JSON.stringify(chunkChars)}\n`
+    );
+  }
   return Ok(parts.join(" "));
 };
 

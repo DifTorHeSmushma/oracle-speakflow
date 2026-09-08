@@ -19,6 +19,7 @@
     "check:delivery:electron": "tsx scripts/gate-electron-delivery.ts",
     "check:wer": "tsx scripts/gate-wer-fixtures.ts",
     "check:latency-overlap": "node scripts/check-latency-overlap.mjs",
+    "check:f8-full-dump": "node scripts/check-f8-full-dump.mjs",
     "proof:packaged-worker": "node scripts/proof-packaged-worker.mjs",
     "proof:domenic-latency": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/latency-proof-domenic-study.ps1",
     "validate:gates": "node scripts/gate-report.mjs",

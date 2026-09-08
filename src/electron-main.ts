@@ -1388,6 +1388,9 @@ async function runPipelineBody(
     audioSec,
     rawAudioSec,
     wavBytes: wavBuffer.length,
+    chunkedFinalize: useChunkedFinalize,
+    /** Must stay true: audioSec!==raw was the Aug 2026 F8 second-half paste bug. */
+    fullDumpCoverage: audioSec === rawAudioSec,
     transcribeWallMs,
     specWaitMs,
     ok: textResult.ok,

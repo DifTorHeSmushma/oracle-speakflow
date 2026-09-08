@@ -5,6 +5,11 @@ import { spawnSync } from "node:child_process";
 
 const GATES = [
   {
+    id: "G-F8",
+    covers: "F8 long dumps — settle must chunk full WAV (never trailing-trim second-half paste)",
+    command: ["npm", "run", "check:f8-full-dump"],
+  },
+  {
     id: "G-D1b",
     covers: "M1/#11 — Electron/Cursor-class host receives text via restore+Ctrl+V",
     command: ["npm", "run", "check:delivery:electron"],

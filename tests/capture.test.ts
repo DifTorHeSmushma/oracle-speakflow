@@ -71,6 +71,14 @@ describe("chunkWavBySec", () => {
     expect(totalPcm).toBe(wav.length - 44);
   });
 
+  it("preserves full PCM with overlap (no head drop)", () => {
+    const wav = buildWavBuffer(pcmSeconds(60, 7));
+    const chunks = chunkWavBySec(wav, 25, 1);
+    expect(chunks.length).toBeGreaterThan(1);
+    // Chronological: first chunk starts at PCM byte 0
+    expect(chunks[0]!.subarray(44).equals(wav.subarray(44, 44 + chunks[0]!.length - 44))).toBe(true);
+  });
+
   it("trimWavToMaxSec keeps only the trailing window (regression: old F8 bug)", () => {
     const wav = buildWavBuffer(pcmSeconds(60));
     const trimmed = trimWavToMaxSec(wav, 28);

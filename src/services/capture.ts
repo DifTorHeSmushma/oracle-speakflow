@@ -157,13 +157,18 @@ export function trimWavToMaxSec(wav: Buffer, maxSec: number): Buffer {
 /**
  * Split a full-session WAV into chronological chunks (no dropped head).
  * Used for F8/PTT brain dumps: trailing trim was keeping only the last ~28s.
+ * Optional overlapSec reduces word loss at chunk boundaries (ASR stitch).
  */
-export function chunkWavBySec(wav: Buffer, chunkSec: number): Buffer[] {
+export function chunkWavBySec(wav: Buffer, chunkSec: number, overlapSec = 0): Buffer[] {
   if (wav.length <= 44 || chunkSec <= 0) return [wav];
   const pcm = wav.subarray(44);
   const chunkBytes = Math.floor(chunkSec * SAMPLE_RATE) * 2;
   if (pcm.length <= chunkBytes) return [wav];
 
+  const overlapBytes = Math.max(
+    0,
+    Math.min(Math.floor(overlapSec * SAMPLE_RATE) * 2, chunkBytes - SAMPLE_RATE * 2)
+  );
   const minTailBytes = SAMPLE_RATE; // 0.5s of s16le mono — absorb into prior chunk
   const out: Buffer[] = [];
   for (let off = 0; off < pcm.length; ) {
@@ -171,7 +176,9 @@ export function chunkWavBySec(wav: Buffer, chunkSec: number): Buffer[] {
     const leftover = pcm.length - end;
     if (leftover > 0 && leftover < minTailBytes) end = pcm.length;
     out.push(buildWavBuffer(pcm.subarray(off, end)));
-    off = end;
+    if (end >= pcm.length) break;
+    const next = end - overlapBytes;
+    off = next > off ? next : end;
   }
   return out.length > 0 ? out : [wav];
 }
