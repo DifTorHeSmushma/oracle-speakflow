@@ -1782,8 +1782,10 @@ function registerHotkey(hotkey: HotkeyConfig): void {
         health,
       };
     }
-    if (!hf) {
-      // PTT-only: stop capture (release mic) after taking the segment
+    if (!hf || mutedPttOverride) {
+      // PTT-only, or muted F8 override: stop capture after the segment.
+      // Leaving an orphan capture without VAD blocks unmute from re-arming LISTENING
+      // (wireMuteHandler only calls startContinuousMode when captureSession is null).
       void captureSession.stop().catch(() => {});
       captureSession = null;
       streamFrameListenerAttached = false;
@@ -1963,11 +1965,23 @@ function wireMuteHandler(): void {
       resetToIdle(muteMsg);
     }
 
-    // Un-mute: re-open mic (hands-free mode restarts capture + VAD)
-    if (!muteState.muted && !captureSession && isOk(liveConfig) && liveConfig.value.voiceMode === "handsFree") {
-      startContinuousMode().catch((err: unknown) =>
-        console.error("[MUTE] failed to restart capture:", err)
-      );
+    // Un-mute: re-open mic (hands-free mode restarts capture + VAD).
+    // Orphan capture after muted F8 (no vadEvents) must be recycled — otherwise
+    // UI shows Idle/"mic ready" while MuteBar says Listening and F8 yields empty WAVs.
+    if (!muteState.muted && isOk(liveConfig) && liveConfig.value.voiceMode === "handsFree") {
+      if (captureSession && !vadEvents) {
+        console.log("[MUTE] recycling orphan capture (no VAD) before hands-free re-arm");
+        streamFrameListenerAttached = false;
+        void captureSession.stop().catch(() => {});
+        captureSession = null;
+      }
+      if (!captureSession) {
+        startContinuousMode().catch((err: unknown) =>
+          console.error("[MUTE] failed to restart capture:", err)
+        );
+      } else {
+        maybeRelisten();
+      }
     }
 
     // Rebuild tray menu to show current label
