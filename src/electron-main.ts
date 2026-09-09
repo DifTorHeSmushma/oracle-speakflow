@@ -1342,9 +1342,24 @@ async function runPipelineBody(
         console.log(
           `[TRANSCRIBE] settle=live-fallback chars=${live.length} (speculative ${early.error.kind}; specWaitMs=${specWaitMs})`
         );
+      } else if (
+        early.error.kind === "networkTimeout" ||
+        early.error.kind === "apiError"
+      ) {
+        // Speculative already finished (failed). One recovery finalize on the final WAV
+        // is not the double-RTT bug (that was stacking a second call while the first
+        // was still in flight). Without this, Dom sees ERROR with good audio and no paste.
+        console.log(
+          `[TRANSCRIBE] speculative ${early.error.kind} — recovery finalize on final WAV (specWaitMs=${specWaitMs})`
+        );
+        textResult = await runFinalize();
+        settleSource = "groq";
+        console.log(
+          textResult.ok
+            ? `[TRANSCRIBE] settle=groq-recovery chars=${textResult.value.length} specWaitMs=${specWaitMs}`
+            : `[TRANSCRIBE] recovery finalize miss kind=${textResult.error.kind} (specWaitMs=${specWaitMs})`
+        );
       } else {
-        // Do not run a second full finalize on the same WAV after already waiting on
-        // a near-final speculative request; that recreates the 40–60s double-RTT bug.
         textResult = early;
         settleSource = "speculative";
         console.log(
@@ -1395,6 +1410,15 @@ async function runPipelineBody(
     specWaitMs,
     ok: textResult.ok,
     errKind: textResult.ok ? null : textResult.error.kind,
+    errStatus:
+      !textResult.ok && textResult.error.kind === "apiError"
+        ? textResult.error.statusCode
+        : null,
+    errMessage: textResult.ok
+      ? null
+      : "message" in textResult.error
+        ? String(textResult.error.message).slice(0, 180)
+        : null,
     liveChars: liveInsertedText.length,
     skippedFinalize: false,
     settleSource,
