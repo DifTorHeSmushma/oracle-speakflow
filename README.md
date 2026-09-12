@@ -66,8 +66,9 @@ For **Windows installer** or **macOS beta** testers — no coding required.
 
 | Platform | How |
 |----------|-----|
-| **Windows** | Run `Oracle SpeakFlow Setup *.exe` from `dist-installer/` (or ask your builder for the installer file). |
-| **macOS beta** | Download the `.zip` artifact from a **Mac Package** CI run. Unzip → right-click **Oracle SpeakFlow.app** → **Open** (Gatekeeper may block on first launch). |
+| **All platforms (recommended)** | Open **[Releases](https://github.com/DifTorHeSmushma/oracle-speakflow/releases)** → download the installer for your OS (Windows Setup `.exe`, macOS `.dmg`/`.zip`, Linux `.deb`/AppImage). |
+| **Windows (from source)** | Or build locally: `npm run package` → run `Oracle SpeakFlow Setup *.exe` from `dist-installer/`. |
+| **macOS beta** | Prefer Releases. Or download the `.zip` from a **Mac Package** CI run → right-click **Oracle SpeakFlow.app** → **Open** (Gatekeeper may block on first launch). |
 
 SpeakFlow runs from the **system tray**. Click the tray icon to open the panel.
 
