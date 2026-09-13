@@ -58,3 +58,8 @@ Run /prime then /plan. Do not write feature code until I approve the plan.
 - Reviews / reports: `.agents/code-reviews/`, `.agents/execution-reports/`, `.agents/system-reviews/`
 - RCAs: `docs/rca/`
 - Tracker is GitHub Issues only (no Jira / Confluence required for this product).
+
+## Trajectory sensor
+
+Live review workflow installed; non-blocking. Requires Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN`.
+
