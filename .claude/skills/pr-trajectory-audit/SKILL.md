@@ -1,4 +1,4 @@
----
+﻿---
 name: pr-trajectory-audit
 description: >-
   Two connected workflows that audit a repo's PRs against its OWN documented AI
@@ -24,16 +24,16 @@ argument-hint: "[owner/repo]"
 # PR Trajectory Audit
 
 **Installed in Oracle SpeakFlow (`DifTorHeSmushma/oracle-speakflow`).** This copy is
-adapted to this repo's authority model — see "This repo's AI layer" immediately
+adapted to this repo's authority model โ€” see "This repo's AI layer" immediately
 below. It judges **documented process on PRs**. It does not replace `/validate`,
 `/code-review`, or `/system-review`, and a clean report is **never** an auto-merge
 signal. See `AI_LAYER.md` stop rules.
 
-## This repo's AI layer — read these, in this order
+## This repo's AI layer โ€” read these, in this order
 
 | # | Path | What it carries |
 | :--- | :--- | :--- |
-| 1 | `AI_LAYER.md` | Agent operating contract — ticket/spec, mandatory loop, stop rules, installed skills. |
+| 1 | `AI_LAYER.md` | Agent operating contract โ€” ticket/spec, mandatory loop, stop rules, installed skills. |
 | 2 | `CLAUDE.md` | Product conventions and invariants for this Electron/Windows delivery stack. |
 | 3 | Active spec under `docs/DESIGN/` | Milestone PRD / Spec / plan named in the session. |
 | 4 | Active plan / reports under `.agents/` | Plans, code-reviews, execution-reports, system-reviews when present. |
@@ -114,7 +114,7 @@ checked against rules that already exist.
    a Tier 2 verdict. **Do not stop at the first file you find**, and do not go
    inventing foreign paths (`docs/SYSTEM_PROMPT.md`, `.cursor/commands/`,
    marketing `PRODUCT_TRUTH`). SpeakFlow **does** have `CLAUDE.md` and
-   `.claude/commands/` — read them.
+   `.claude/commands/` โ€” read them.
    - Concretely, for oracle-speakflow that means: `AI_LAYER.md` (ticket/spec,
      mandatory loop, stop rules), `CLAUDE.md` (product invariants), active
      `docs/DESIGN/` specs named in the session, `.agents/` plans/reports when
@@ -212,7 +212,7 @@ checked against rules that already exist.
    it by hand:
    - If `.github/workflows/trajectory-review.yml` doesn't already exist in this
      repo, copy `assets/trajectory-review.yml` there. (In oracle-speakflow it already
-     does — installed alongside this skill.)
+     does โ€” installed alongside this skill.)
    - Then tell the user plainly that three things are left, **and only these
      three** -- none of them are things you can do from here, all three are
      one-time:
@@ -242,11 +242,11 @@ This is what Claude does when `trajectory-review.yml` invokes it on a new PR.
    Prints CI-status, scope-blast-radius, and duplicate-vs-recent findings as
    JSON. This is evidence toward specific rules, not a verdict -- read it, don't
    just relay it. **In the live Action, Tier 1 has already run as its own CI step
-   and written `tier1-evidence.json` to the workspace root — read that file rather
+   and written `tier1-evidence.json` to the workspace root โ€” read that file rather
    than re-running the script.**
    - **`ci_status` must not be quoted at face value when `passed` is empty.** A
      `PASS` whose `passed` list is **[]** means *no usable CI evidence for that
-     PR*, not a green gate. SpeakFlow **does** have `.github/workflows/ci.yml` —
+     PR*, not a green gate. SpeakFlow **does** have `.github/workflows/ci.yml` โ€”
      empty list is still a script/filter problem, not proof the product has no CI.
      Read the `reason` string, not just the verdict.
    - **`scope_blast_radius: SKIP` is zero signal, not a pass.**
@@ -272,7 +272,7 @@ This is what Claude does when `trajectory-review.yml` invokes it on a new PR.
 7. **Stop there.** Don't auto-approve, auto-block, or auto-merge. A clean
    trajectory report is **not** a merge signal and never substitutes for
    `/validate`, `/code-review`, or `/system-review`. Never propose creating
-   `docs/SYSTEM_PROMPT.md`. This repo already has `CLAUDE.md` — do not invent a
+   `docs/SYSTEM_PROMPT.md`. This repo already has `CLAUDE.md` โ€” do not invent a
    second one. Name the *kind* of AI-layer fix (tighten / add rule); don't rewrite
    the rule in the PR comment.
 
@@ -282,7 +282,7 @@ This is what Claude does when `trajectory-review.yml` invokes it on a new PR.
   workflows.
 - **`ci_status` can still return a FALSE `PASS` with empty `passed: []`.** Treat
   that as `FAIL`/no-usable-evidence for *this PR*, never as a green gate. SpeakFlow
-  already has real CI (`ci.yml` + package workflows) — do not claim the product has
+  already has real CI (`ci.yml` + package workflows) โ€” do not claim the product has
   zero Actions. The empty-list quirk is a `mine_prs.py` heuristic defect (own issue
   to fix), not proof CI is missing.
 - **Installing `trajectory-review.yml` needs the Claude Code GitHub App
@@ -324,7 +324,7 @@ This is what Claude does when `trajectory-review.yml` invokes it on a new PR.
   only PR in repo history (#2) came from a branch on the repo itself, not a fork.
 - The scope check only applies to `fix(module):`-titled PRs -- on a repo that
   doesn't use that convention it `SKIP`s every single PR and contributes zero
-  signal, silently. That is the current state here: it SKIPped PR #2, and
+  signal, silently. That is the current state here: it SKIPped PR #8, and
   `.claude/commands/commit.md` governs *commit messages*, not PR titles, so
   nothing pushes PR titles toward `fix(scope):` at all. Say so if it's happening
   rather than posting a comment that implies the check ran and passed.
