@@ -84,13 +84,62 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
+      - name: Artifact hygiene check
+        run: |
+          set -euo pipefail
+          echo "=== Checking for .env files in dist-installer ==="
+          if find dist-installer -name ".env" | grep -q .; then
+            echo "FAIL: .env file found in artifact tree"
+            exit 1
+          fi
+          echo "OK: no .env files"
+
+          # Check only user-facing metadata files for CI runner path leaks (not the full unpack
+          # tree — native deps embed CI build paths in intermediates, same as mac-package.yml).
+          echo "=== Checking metadata for CI runner path leaks ==="
+          LEAK=""
+          while IFS= read -r f; do
+            if grep -q '/home/runner/' "$f" 2>/dev/null; then
+              LEAK="$f"
+              break
+            fi
+          done < <(find dist-installer -type f \( -name '*.desktop' -o -name '*.yml' \) 2>/dev/null)
+          if [ -n "$LEAK" ]; then
+            echo "FAIL: /home/runner/ path in $LEAK"
+            exit 1
+          fi
+          echo "OK: no runner paths in metadata"
+
+          echo "=== Artifact list ==="
+          ls -lh dist-installer/*.deb 2>/dev/null || true
+          ls -lh dist-installer/*.AppImage 2>/dev/null || true
+          echo "Hygiene PASS"
+
+      # Upload immediately after package — do not lose installers if G31 apt mirrors 404 (v0.1.1).
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-speakflow-linux-deb
+          path: dist-installer/*.deb
+          if-no-files-found: error
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-speakflow-linux-appimage
+          path: dist-installer/*.AppImage
+          if-no-files-found: warn
+
       # G31: runner audio smoke — proves FFmpeg reads frames through the PulseAudio/PipeWire API.
       # Pre-authorized degrade: if the runner can't host a pulse daemon, degrade to device-enumeration
       # assert (pactl loads the null-sink module OR lists ≥1 source). Human smoke carries L-4 proof.
+      # continue-on-error: apt mirror flakes must not block Release assets (upload already ran).
       - name: G31 — pulse audio smoke (null-sink capture test)
+        continue-on-error: true
         run: |
           set -euo pipefail
 
+          sudo apt-get update
           sudo apt-get install -y pulseaudio pulseaudio-utils ffmpeg
 
           # Attempt full null-sink capture smoke.
@@ -172,48 +221,3 @@ jobs:
             echo "WARN: AppImage exited before T+10 s (AppArmor sandbox caveat on 24.04 — expected, LD8)"
             cat /tmp/appimage.log || true
           fi
-
-      - name: Artifact hygiene check
-        run: |
-          set -euo pipefail
-          echo "=== Checking for .env files in dist-installer ==="
-          if find dist-installer -name ".env" | grep -q .; then
-            echo "FAIL: .env file found in artifact tree"
-            exit 1
-          fi
-          echo "OK: no .env files"
-
-          # Check only user-facing metadata files for CI runner path leaks (not the full unpack
-          # tree — native deps embed CI build paths in intermediates, same as mac-package.yml).
-          echo "=== Checking metadata for CI runner path leaks ==="
-          LEAK=""
-          while IFS= read -r f; do
-            if grep -q '/home/runner/' "$f" 2>/dev/null; then
-              LEAK="$f"
-              break
-            fi
-          done < <(find dist-installer -type f \( -name '*.desktop' -o -name '*.yml' \) 2>/dev/null)
-          if [ -n "$LEAK" ]; then
-            echo "FAIL: /home/runner/ path in $LEAK"
-            exit 1
-          fi
-          echo "OK: no runner paths in metadata"
-
-          echo "=== Artifact list ==="
-          ls -lh dist-installer/*.deb 2>/dev/null || true
-          ls -lh dist-installer/*.AppImage 2>/dev/null || true
-          echo "Hygiene PASS"
-
-      - name: Upload deb artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: oracle-speakflow-linux-deb
-          path: dist-installer/*.deb
-          if-no-files-found: error
-
-      - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: oracle-speakflow-linux-appimage
-          path: dist-installer/*.AppImage
-          if-no-files-found: warn
