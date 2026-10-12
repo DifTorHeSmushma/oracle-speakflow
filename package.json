@@ -1,6 +1,6 @@
 {
   "name": "oracle-speakflow",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Hands-free speech-to-text that pastes into whatever app has focus — for anyone who types all day (writers, teachers, admins, developers).",
   "type": "module",
   "main": "dist/electron-main.js",
