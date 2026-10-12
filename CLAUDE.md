@@ -77,7 +77,7 @@ Electron's `require()` patching. Do not route Electron paste through `injector.t
 16. **UI Component Density** — No single Svelte component shall exceed 250 lines. Use composition over massive files.
 17. **Single mic owner** — FFmpeg (main process) is the sole microphone consumer. The renderer must never call `getUserMedia`. VAD consumes FFmpeg's PCM stream; it must not open a second device handle.
 18. **Never steal foreground** — the pipeline must never call `SetForegroundWindow`/`AttachThreadInput`; the tray uses `showInactive` only. Paste lands in the already-focused window or degrades to clipboard+toast.
-19. **No paste/record while muted** — VAD and `decidePaste` must hard-check `mute.ts`; zero pastes and zero recording while muted or kill-switch active. Kill-switch closes the mic device (indicator dark), never discard-only.
+19. **No paste/record while muted** — VAD and `decidePaste` must hard-check `mute.ts`; zero pastes and zero ambient recording while muted or kill-switch active. Kill-switch closes the mic device (indicator dark), never discard-only. **Exception (explicit PTT):** hold-hotkey while user-muted is an intentional override that may cold-start capture and paste (`allowDeliveryWhileMuted`); it must wait for first PCM before `markSpeechStart` (issue #13 — empty WAV after mute).
 
 ## State Machine (index.ts)
 

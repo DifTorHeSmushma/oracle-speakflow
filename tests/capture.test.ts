@@ -132,4 +132,24 @@ describe("capture service", () => {
     expect(detailed.meta.speechFrameCount).toBe(20);
     expect(detailed.gainedWav.length).toBe(44 + 20 * FRAME_BYTES);
   });
+
+  it("waitForFirstPcm resolves true after first frame (muted F8 cold-start #13)", async () => {
+    const result = startContinuousCapture();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const pending = result.value.waitForFirstPcm(1000);
+    await Promise.resolve();
+    pushFrame(proc, 100);
+    await expect(pending).resolves.toBe(true);
+    expect(result.value.getHealth().firstPcmMs).not.toBeNull();
+  });
+
+  it("waitForFirstPcm times out when no PCM arrives", async () => {
+    const result = startContinuousCapture();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    await expect(result.value.waitForFirstPcm(40)).resolves.toBe(false);
+  });
 });

@@ -80,8 +80,17 @@ export type CaptureSession = {
    */
   peekSessionWav: (startFrame: number, endFrame: number) => Buffer | null;
   getHealth: () => CaptureHealth;
+  /**
+   * Resolve when the first PCM chunk arrives (or `false` on timeout / stop).
+   * Needed after mute kill-switch cold-starts FFmpeg — markSpeechStart before
+   * first PCM yields empty 44-byte WAVs (muted F8 / Dom latency.jsonl).
+   */
+  waitForFirstPcm: (timeoutMs: number) => Promise<boolean>;
   stop: () => Promise<void>;
 };
+
+/** Default wait after spawning FFmpeg before treating PTT as armed (issue #13). */
+export const CAPTURE_FIRST_PCM_TIMEOUT_MS = 2500;
 
 // ---------------------------------------------------------------------------
 // Ring buffer of s16le frame Buffers
@@ -267,10 +276,18 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
 
   const ffmpegSpawnMs = performance.now();
   let firstPcmMs: number | null = null;
+  const firstPcmWaiters: Array<(ok: boolean) => void> = [];
   let ffmpegRterrCount = 0;
   let windowBytes = 0;
   let windowStartMs = ffmpegSpawnMs;
   let bytesPerSecWindow: number | null = null;
+
+  const resolveFirstPcmWaiters = (ok: boolean): void => {
+    while (firstPcmWaiters.length > 0) {
+      const w = firstPcmWaiters.shift();
+      w?.(ok);
+    }
+  };
 
   const clearSession = (): void => {
     sessionSpeech = null;
@@ -297,6 +314,7 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
       write(chunk: Buffer, _enc, cb) {
         if (firstPcmMs === null && chunk.length > 0) {
           firstPcmMs = performance.now();
+          resolveFirstPcmWaiters(true);
         }
         windowBytes += chunk.length;
         const now = performance.now();
@@ -526,11 +544,30 @@ export const startContinuousCapture = (): Result<CaptureSession, RecorderError> 
         };
       },
 
+      waitForFirstPcm(timeoutMs: number) {
+        if (firstPcmMs !== null) return Promise.resolve(true);
+        if (stopped) return Promise.resolve(false);
+        return new Promise<boolean>((resolve) => {
+          let settled = false;
+          const finish = (ok: boolean): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            const idx = firstPcmWaiters.indexOf(finish);
+            if (idx >= 0) firstPcmWaiters.splice(idx, 1);
+            resolve(ok);
+          };
+          const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+          firstPcmWaiters.push(finish);
+        });
+      },
+
       stop() {
         if (stopped) return Promise.resolve();
         stopped = true;
         intentionalStop = true;
         clearSession();
+        resolveFirstPcmWaiters(false);
         try { proc.kill(); } catch { /* best-effort */ }
         stream.unpipe(writable);
         writable.end();

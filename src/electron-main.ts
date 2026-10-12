@@ -35,7 +35,12 @@ import { restoreCapturedHwnd } from "./utils/win32-restore-captured.js";
 import { getLinuxSession } from "./utils/linux-session.js";
 import { getLastLinuxReadMeta } from "./utils/linux-window.js";
 import { recordExternalSample, captureNow, type TrackedTarget } from "./services/foregroundTracker.js";
-import { startContinuousCapture, trimWavToMaxSec, type CaptureSession } from "./services/capture.js";
+import {
+  startContinuousCapture,
+  trimWavToMaxSec,
+  CAPTURE_FIRST_PCM_TIMEOUT_MS,
+  type CaptureSession,
+} from "./services/capture.js";
 import { createVad, type VadEvents, type SpeechEndPayload } from "./services/vad.js";
 import { decidePaste, classifyTarget, type PasteDecision } from "./services/paste.js";
 import {
@@ -113,6 +118,9 @@ let suppressBlur = false;
 type State = AppState;
 let state: State = "IDLE";
 let captureSession: CaptureSession | null = null;  // continuous FFmpeg stream (Invariant #17)
+/** PTT/muted-F8: wait for first PCM after cold start before markSpeechStart (issue #13). */
+let pttArmPromise: Promise<boolean> | null = null;
+let pttSpeechMarked = false;
 
 // Issue #6 — Phase-1 streaming live-insert state.
 let activeStream: StreamingSession | null = null;
@@ -1759,6 +1767,7 @@ function registerHotkey(hotkey: HotkeyConfig): void {
     // Wave 3 §4.1: snapshot the prior external target at PTT keydown.
     utteranceCapture = captureNow(Date.now());
 
+    const coldStart = captureSession === null;
     if (!captureSession) {
       // PTT: start capture now (lazy start; in hands-free capture is always running)
       const capResult = startContinuousCapture();
@@ -1770,11 +1779,33 @@ function registerHotkey(hotkey: HotkeyConfig): void {
       captureSession = capResult.value;
     }
 
-    captureSession.markSpeechStart();
+    const session = captureSession;
     transition("RECORDING");
-    attachStreamFramePump(captureSession);
+    attachStreamFramePump(session);
     beginDictationStream();
     console.log("[PTT] Recording...");
+
+    // Issue #13: after mute kill-switch, FFmpeg has no PCM yet. markSpeechStart
+    // before first frame → empty 44-byte WAV and "F8 does nothing".
+    pttSpeechMarked = false;
+    const needsPcmWait = coldStart || session.getHealth().firstPcmMs === null;
+    if (!needsPcmWait) {
+      session.markSpeechStart();
+      pttSpeechMarked = true;
+      pttArmPromise = Promise.resolve(true);
+    } else {
+      pttArmPromise = (async () => {
+        const ready = await session.waitForFirstPcm(CAPTURE_FIRST_PCM_TIMEOUT_MS);
+        if (state !== "RECORDING" || captureSession !== session) return false;
+        session.markSpeechStart();
+        pttSpeechMarked = true;
+        const health = session.getHealth();
+        console.log(
+          `[PTT] armed after first PCM ready=${ready} ttfbMs=${health.ttfbMs ?? "n/a"}`
+        );
+        return ready;
+      })();
+    }
   });
 
   uIOhook.on("keyup", (e) => {
@@ -1784,45 +1815,88 @@ function registerHotkey(hotkey: HotkeyConfig): void {
 
     if (!captureSession) {
       console.error("[PTT-KEYUP] captureSession is null — resetting to IDLE");
+      pttArmPromise = null;
+      pttSpeechMarked = false;
       resetToIdle();
       return;
     }
 
-    const detailed = captureSession.takeSegmentDetailed(0);
-    const wav = detailed.gainedWav;
-    const health = captureSession.getHealth();
+    const session = captureSession;
     const hf = isOk(liveConfig) && liveConfig.value.voiceMode === "handsFree";
     const mutedPttOverride = hf && getMuteState().muted;
     const pipelineMode = !hf || mutedPttOverride ? "ptt" : "handsFree";
-    if (isCaptureDiagEnabled()) {
-      pendingCaptureDiag = {
-        utteranceId: newUtteranceId(),
-        voiceMode: pipelineMode,
-        detailed,
-        vadQueueDepthMax: null,
-        vadProcessLagFrames: null,
-        ortRunMs: null,
-        appStateAtSpeechEnd: state,
-        health,
-      };
-    }
-    if (!hf || mutedPttOverride) {
-      // PTT-only, or muted F8 override: stop capture after the segment.
-      // Leaving an orphan capture without VAD blocks unmute from re-arming LISTENING
-      // (wireMuteHandler only calls startContinuousMode when captureSession is null).
-      void captureSession.stop().catch(() => {});
-      captureSession = null;
-      streamFrameListenerAttached = false;
-    }
-
     const t0 = performance.now();
-    void endDictationStream().then(() => {
-      runPipeline(wav, pipelineMode, t0, undefined, null, null, mutedPttOverride).catch((err: unknown) => {
+
+    void (async () => {
+      try {
+        if (pttArmPromise) {
+          await pttArmPromise;
+        }
+        if (!pttSpeechMarked && captureSession === session) {
+          const ready = await session.waitForFirstPcm(500);
+          if (captureSession === session && state === "RECORDING") {
+            session.markSpeechStart();
+            pttSpeechMarked = true;
+            console.log(`[PTT] late-arm on keyup ready=${ready}`);
+          }
+        }
+
+        if (captureSession !== session) {
+          console.error("[PTT-KEYUP] captureSession changed during arm — abort");
+          resetToIdle();
+          return;
+        }
+
+        const detailed = session.takeSegmentDetailed(0);
+        const wav = detailed.gainedWav;
+        const health = session.getHealth();
+        if (isCaptureDiagEnabled()) {
+          pendingCaptureDiag = {
+            utteranceId: newUtteranceId(),
+            voiceMode: pipelineMode,
+            detailed,
+            vadQueueDepthMax: null,
+            vadProcessLagFrames: null,
+            ortRunMs: null,
+            appStateAtSpeechEnd: state,
+            health,
+          };
+        }
+
+        if (!hf || mutedPttOverride) {
+          // PTT-only, or muted F8 override: stop capture after the segment.
+          // Leaving an orphan capture without VAD blocks unmute from re-arming LISTENING
+          // (wireMuteHandler only calls startContinuousMode when captureSession is null).
+          void session.stop().catch(() => {});
+          if (captureSession === session) {
+            captureSession = null;
+            streamFrameListenerAttached = false;
+          }
+        }
+
+        pttArmPromise = null;
+        pttSpeechMarked = false;
+
+        // Empty cold-start clip — do not burn a Groq call (Dom: mute+F8 silent fail).
+        if (detailed.meta.speechFrameCount === 0 || wav.length <= 44) {
+          console.error(
+            `[PTT] empty segment after arm ttfbMs=${health.ttfbMs ?? "n/a"} firstPcm=${health.firstPcmMs !== null}`
+          );
+          flushCaptureDiag({ accepted: false, discardReason: "empty_ptt_segment" });
+          resetToIdle("Mic not ready — hold F8 a moment longer after mute");
+          return;
+        }
+
+        await endDictationStream();
+        await runPipeline(wav, pipelineMode, t0, undefined, null, null, mutedPttOverride);
+      } catch (err: unknown) {
         console.error("FATAL: Unhandled exception escaped pipeline —", err);
         flushCaptureDiag({ accepted: false, discardReason: "pipeline_error" });
+        pttArmPromise = null;
+        pttSpeechMarked = false;
         resetToIdle("Unexpected error");
-      });
-    });
+      }
+    })();
   });
 }
 
@@ -1967,15 +2041,21 @@ function wireMuteHandler(): void {
   onMuteChange((muteState) => {
     console.log(`[MUTE] state → muted=${muteState.muted} reason=${muteState.reason ?? "none"}`);
 
-    // Kill-switch: close mic device + stop resident engine (Invariant #19 / Q4 / §0 Q2)
-    if (muteState.muted && captureSession) {
+    // Kill-switch: close mic device + stop resident engine (Invariant #19 / Q4 / §0 Q2).
+    // Always resetToIdle when muting — even if captureSession is already null mid-
+    // TRANSCRIBING — otherwise F8 is ignored (state gate) while MuteBar says muted (#13).
+    if (muteState.muted) {
       stopCallAppPoll();
       abortDictationStream();
       streamFrameListenerAttached = false;
+      pttArmPromise = null;
+      pttSpeechMarked = false;
       vadEvents?.stop();
       vadEvents = null;
-      void captureSession.stop().catch(() => {});
-      captureSession = null;
+      if (captureSession) {
+        void captureSession.stop().catch(() => {});
+        captureSession = null;
+      }
       if (activeEngineHandle) {
         void stopEngine(activeEngineHandle).catch(() => {});
         activeEngineHandle = null;
